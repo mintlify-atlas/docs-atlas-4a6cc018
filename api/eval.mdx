@@ -1,0 +1,514 @@
+---
+title: Evaluation API
+description: Tools for evaluating OCR model performance and comparing different extraction methods
+---
+
+## Overview
+
+The Evaluation API provides comprehensive tools for assessing OCR model quality through alignment metrics, human review interfaces, and pairwise comparisons. It supports evaluation against gold standard datasets and side-by-side method comparisons.
+
+## Core Modules
+
+### runeval - Gold Standard Evaluation
+
+Evaluate OCR outputs against gold standard annotations using document edit similarity metrics.
+
+**Source:** `olmocr/eval/runeval.py`
+
+### buildelo - Pairwise Method Comparison
+
+Generate comparison pages for ranking different OCR extraction methods.
+
+**Source:** `olmocr/eval/buildelo.py`
+
+## Main Functions
+
+### do_eval
+
+Compare OCR outputs against gold standard data and generate review HTML pages.
+
+<ParamField path="gold_data_path" type="str" required>
+  Path to gold standard JSONL files (local directory or S3 path)
+</ParamField>
+
+<ParamField path="eval_data_path" type="str" required>
+  Path to evaluation JSONL files to compare
+</ParamField>
+
+<ParamField path="review_page_name" type="str" required>
+  Base name for generated HTML review pages
+</ParamField>
+
+<ParamField path="review_page_size" type="int" required>
+  Number of samples to include in review pages
+</ParamField>
+
+<ResponseField name="alignment_score" type="float">
+  Character-weighted mean alignment score (0-1 range)
+</ResponseField>
+
+<ResponseField name="page_eval_data" type="list[dict]">
+  List of page comparison data with alignment scores
+</ResponseField>
+
+**Source:** `olmocr/eval/runeval.py:278`
+
+<CodeGroup>
+```python Basic Evaluation
+from olmocr.eval.runeval import do_eval
+
+# Evaluate against gold standard
+score, eval_data = do_eval(
+    gold_data_path="s3://bucket/gold-data/",
+    eval_data_path="s3://bucket/model-outputs/",
+    review_page_name="model_v1_eval",
+    review_page_size=50
+)
+
+print(f"Mean alignment: {score:.3f}")
+```
+
+```python Local Files
+score, eval_data = do_eval(
+    gold_data_path="./gold_annotations",
+    eval_data_path="./model_predictions",
+    review_page_name="local_eval",
+    review_page_size=20
+)
+```
+</CodeGroup>
+
+<Info>
+Generates two HTML files:
+- `{review_page_name}_worst.html` - Lowest alignment samples
+- `{review_page_name}_sample.html` - Random sample of results
+</Info>
+
+### load_gold_data
+
+Load gold standard annotations from JSONL files with multithreaded processing.
+
+<ParamField path="gold_data_path" type="str" required>
+  Path to directory containing gold JSONL files
+</ParamField>
+
+<ParamField path="max_workers" type="int" default="8">
+  Maximum number of threads for parallel loading
+</ParamField>
+
+<ResponseField name="gold_data" type="dict[str, str]">
+  Dictionary mapping gold keys (e.g., `"s3://path/file.pdf-4"`) to text content
+</ResponseField>
+
+**Source:** `olmocr/eval/runeval.py:140`
+
+```python
+from olmocr.eval.runeval import load_gold_data
+
+gold_data = load_gold_data(
+    gold_data_path="s3://bucket/gold/",
+    max_workers=16
+)
+
+print(f"Loaded {len(gold_data)} gold entries")
+```
+
+### normalize_json_entry
+
+Normalize different JSONL formats (OpenAI, Birr, SGLang) into a common structure.
+
+<ParamField path="data" type="dict" required>
+  Raw JSONL entry from any supported format
+</ParamField>
+
+<ResponseField name="entry" type="NormalizedEntry">
+  Normalized entry with consistent fields
+</ResponseField>
+
+**Source:** `olmocr/eval/runeval.py:84`
+
+<CodeGroup>
+```python OpenAI Format
+import json
+from olmocr.eval.runeval import normalize_json_entry
+
+with open("openai_response.jsonl") as f:
+    for line in f:
+        data = json.loads(line)
+        entry = normalize_json_entry(data)
+        print(f"{entry.s3_path} page {entry.pagenum}: {entry.text[:100]}")
+```
+
+```python Birr Format
+entry = normalize_json_entry({
+    "custom_id": "s3://bucket/file.pdf-5",
+    "outputs": [{"text": '{"natural_text": "..."}'}, "finish_reason": "stop"}]
+})
+```
+</CodeGroup>
+
+### process_jsonl_file
+
+Process a single JSONL file and compute alignment scores against gold data.
+
+<ParamField path="jsonl_file" type="str" required>
+  Path to JSONL file to process
+</ParamField>
+
+<ParamField path="gold_data" type="dict" required>
+  Gold standard data dictionary
+</ParamField>
+
+<ParamField path="comparer" type="DocumentEditSimilarity" required>
+  Metric calculator instance
+</ParamField>
+
+<ResponseField name="results" type="tuple">
+  Returns (total_score, char_weighted_score, total_chars, total_pages, errors, overruns, page_data)
+</ResponseField>
+
+**Source:** `olmocr/eval/runeval.py:231`
+
+## Data Classes
+
+### NormalizedEntry
+
+Standardized representation of OCR output for any input format.
+
+**Source:** `olmocr/eval/runeval.py:66`
+
+<ResponseField name="s3_path" type="str">
+  S3 path to source PDF document
+</ResponseField>
+
+<ResponseField name="pagenum" type="int">
+  Page number (1-indexed)
+</ResponseField>
+
+<ResponseField name="text" type="str | None">
+  Extracted OCR text content
+</ResponseField>
+
+<ResponseField name="finish_reason" type="str | None">
+  Completion status ("stop", "length", etc.)
+</ResponseField>
+
+<ResponseField name="error" type="str | None">
+  Error message if processing failed
+</ResponseField>
+
+#### Properties
+
+<ResponseField name="goldkey" type="str">
+  Combined identifier: `"{s3_path}-{pagenum}"`
+</ResponseField>
+
+#### Static Methods
+
+##### from_goldkey
+
+Construct NormalizedEntry from a gold key string.
+
+<ParamField path="goldkey" type="str" required>
+  Gold key in format `"s3://path/file.pdf-5"`
+</ParamField>
+
+<ParamField path="**kwargs" type="dict">
+  Additional fields (text, finish_reason, error)
+</ParamField>
+
+```python
+from olmocr.eval.runeval import NormalizedEntry
+
+entry = NormalizedEntry.from_goldkey(
+    goldkey="s3://bucket/doc.pdf-3",
+    text="Extracted content...",
+    finish_reason="stop"
+)
+
+print(entry.s3_path)  # "s3://bucket/doc.pdf"
+print(entry.pagenum)  # 3
+print(entry.goldkey)  # "s3://bucket/doc.pdf-3"
+```
+
+### Comparison (buildelo)
+
+Pairwise comparison between two OCR extraction methods.
+
+**Source:** `olmocr/eval/buildelo.py:19`
+
+<ResponseField name="pdf_path" type="str">
+  Path to source PDF
+</ResponseField>
+
+<ResponseField name="comparison_a_path" type="str">
+  Path to first method's output markdown
+</ResponseField>
+
+<ResponseField name="comparison_b_path" type="str">
+  Path to second method's output markdown
+</ResponseField>
+
+<ResponseField name="comparison_a_str" type="str">
+  First method's extracted text
+</ResponseField>
+
+<ResponseField name="comparison_b_str" type="str">
+  Second method's extracted text
+</ResponseField>
+
+<ResponseField name="alignment" type="float">
+  Similarity score between the two methods (0-1)
+</ResponseField>
+
+#### Properties
+
+<ResponseField name="comparison_a_method" type="str">
+  Extracted method name from path (e.g., "pdelf", "marker")
+</ResponseField>
+
+<ResponseField name="comparison_b_method" type="str">
+  Extracted method name from path
+</ResponseField>
+
+## Evaluation Metrics
+
+### Document Edit Similarity
+
+The evaluation uses the Hirschberg alignment algorithm with document edit similarity:
+
+<ParamField path="match_score" type="int" default="1">
+  Score for matching segments
+</ParamField>
+
+<ParamField path="mismatch_score" type="int" default="-1">
+  Penalty for mismatched segments
+</ParamField>
+
+<ParamField path="indel_score" type="int" default="-1">
+  Penalty for insertions/deletions
+</ParamField>
+
+```python
+from dolma_refine.evaluate.aligners import HirschbergAligner
+from dolma_refine.evaluate.metrics import DocumentEditSimilarity
+from dolma_refine.evaluate.segmenters import SpacySegmenter
+
+# Create metric calculator
+segmenter = SpacySegmenter("spacy")
+aligner = HirschbergAligner(
+    match_score=1,
+    mismatch_score=-1,
+    indel_score=-1
+)
+comparer = DocumentEditSimilarity(
+    segmenter=segmenter,
+    aligner=aligner
+)
+
+# Compute similarity
+score = comparer.compute(gold_text, pred_text)
+print(f"Alignment: {score:.3f}")
+```
+
+### Scoring Interpretation
+
+<ResponseField name="1.0" type="Perfect Match">
+  Exact alignment, no differences
+</ResponseField>
+
+<ResponseField name="0.90-0.99" type="Excellent">
+  Minor differences, high quality extraction
+</ResponseField>
+
+<ResponseField name="0.80-0.89" type="Good">
+  Some differences, acceptable quality
+</ResponseField>
+
+<ResponseField name="0.70-0.79" type="Fair">
+  Noticeable differences, needs improvement
+</ResponseField>
+
+<ResponseField name="< 0.70" type="Poor">
+  Significant differences, major issues
+</ResponseField>
+
+## Evaluation Workflow
+
+<Steps>
+  <Step title="Prepare Data">
+    Organize gold standard and evaluation outputs in JSONL format
+  </Step>
+  
+  <Step title="Load Gold Standard">
+    Load reference annotations with multithreaded processing
+  </Step>
+  
+  <Step title="Process Evaluation Files">
+    Compare each evaluation file against gold data using parallel processing
+  </Step>
+  
+  <Step title="Compute Metrics">
+    Calculate page-weighted and character-weighted alignment scores
+  </Step>
+  
+  <Step title="Generate Reports">
+    Create HTML review pages for worst cases and random samples
+  </Step>
+</Steps>
+
+## Pairwise Comparison
+
+### process_single_pdf
+
+Process a single PDF and generate all pairwise comparisons between methods.
+
+<ParamField path="pdf_path" type="str" required>
+  Path to PDF file
+</ParamField>
+
+<ParamField path="all_mds" type="set[str]" required>
+  Set of all available markdown output files
+</ParamField>
+
+<ParamField path="comparisons" type="list[str]" required>
+  List of method names to compare (e.g., ["pdelf", "marker", "gotocr_format"])
+</ParamField>
+
+<ParamField path="segmenter_name" type="str" default="spacy">
+  Name of text segmenter to use
+</ParamField>
+
+<ResponseField name="result_comps" type="list[Comparison]">
+  List of Comparison objects for all method pairs
+</ResponseField>
+
+**Source:** `olmocr/eval/buildelo.py:43`
+
+### build_review_page
+
+Generate HTML review page from comparison results.
+
+<ParamField path="args" type="argparse.Namespace" required>
+  Command-line arguments including name and configuration
+</ParamField>
+
+<ParamField path="comparisons" type="list[Comparison]" required>
+  List of comparison objects to include
+</ParamField>
+
+<ParamField path="index" type="int" default="0">
+  Report index for multi-page generation
+</ParamField>
+
+**Source:** `olmocr/eval/buildelo.py:83`
+
+## Supported Input Formats
+
+### OpenAI Batch API Format
+
+```json
+{
+  "custom_id": "s3://bucket/file.pdf-1",
+  "response": {
+    "body": {
+      "choices": [{
+        "message": {"content": "{\"natural_text\": \"...\"}"}
+        "finish_reason": "stop"
+      }]
+    }
+  }
+}
+```
+
+### Birr Format
+
+```json
+{
+  "custom_id": "s3://bucket/file.pdf-1",
+  "outputs": [{
+    "text": "{\"natural_text\": \"...\"}",
+    "finish_reason": "stop"
+  }],
+  "completion_error": null
+}
+```
+
+### SGLang Format
+
+```json
+{
+  "custom_id": "s3://bucket/file.pdf-1",
+  "response": {
+    "choices": [{
+      "message": {"content": "..."},
+      "finish_reason": "stop"
+    }]
+  }
+}
+```
+
+## Command-Line Usage
+
+### Running Evaluation
+
+```bash
+python -m olmocr.eval.runeval \
+  --name experiment_v1 \
+  --review_size 50 \
+  s3://bucket/gold-data/ \
+  s3://bucket/eval-data/
+```
+
+### Building Comparison Pages
+
+```bash
+python -m olmocr.eval.buildelo \
+  --name method_comparison \
+  --review_size 100 \
+  --comparisons pdelf marker gotocr_format mineru \
+  --num_copies 3 \
+  --max_workers 8 \
+  s3://bucket/outputs/
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Data Preparation">
+    - Ensure gold data has `finish_reason == "stop"` for valid entries
+    - Filter out length overruns and errors before evaluation
+    - Use consistent PDF paths and page numbering (1-indexed)
+    - Compress large datasets with zstandard (.zst extension)
+  </Accordion>
+  
+  <Accordion title="Performance Optimization">
+    - Increase `max_workers` for faster parallel processing
+    - Cache gold data locally to avoid repeated S3 downloads
+    - Use ProcessPoolExecutor for CPU-bound comparison tasks
+    - Filter high-similarity pairs (>0.96) from comparison reviews
+  </Accordion>
+  
+  <Accordion title="Result Analysis">
+    - Review both worst cases and random samples
+    - Look for systematic errors in low-scoring pages
+    - Compare character-weighted vs page-weighted metrics
+    - Track error rates and overrun frequencies
+  </Accordion>
+</AccordionGroup>
+
+## Output Reports
+
+Generated HTML review pages include:
+
+- Side-by-side comparison of gold and predicted text
+- Alignment score for each page
+- PDF rendering for visual reference
+- Method names and metadata
+- Filterable and sortable interface
+
+## See Also
+
+- [Training API](/api/train) - Model training functions
+- [Data Loading API](/api/dataloader) - Dataset preparation
+- [Evaluation Guide](/guides/evaluation) - Detailed evaluation workflows

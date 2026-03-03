@@ -1,0 +1,208 @@
+---
+title: Training Overview
+description: Learn how to fine-tune olmOCR models for document understanding
+---
+
+## Introduction
+
+olmOCR supports fine-tuning vision-language models for document OCR and understanding tasks. The training pipeline uses LoRA (Low-Rank Adaptation) for parameter-efficient fine-tuning and includes comprehensive support for distributed training, experiment tracking, and checkpoint management.
+
+## Supported Models
+
+olmOCR supports fine-tuning two model families:
+
+- **Qwen2-VL**: Efficient vision-language models (2B and 7B variants)
+- **Molmo**: Advanced multimodal models from AI2 (Molmo-7B-O)
+
+## Training Approach
+
+### LoRA Fine-Tuning
+
+olmOCR uses LoRA (Low-Rank Adaptation) for efficient fine-tuning. LoRA adds trainable rank decomposition matrices to model layers while keeping the original weights frozen.
+
+**Benefits:**
+- Reduces memory requirements significantly
+- Faster training with fewer parameters
+- Easy to merge adapters back into base model
+- Multiple adapters can be trained for different tasks
+
+```python train/train.py
+if config.lora is not None:
+    peft_config = LoraConfig(
+        r=config.lora.rank,
+        lora_alpha=config.lora.alpha,
+        lora_dropout=config.lora.dropout,
+        bias=config.lora.bias,
+        task_type=config.lora.task_type,
+        target_modules=list(config.lora.target_modules),
+    )
+    model = get_peft_model(model=model, peft_config=peft_config)
+```
+
+### Training Pipeline
+
+The training pipeline consists of several key stages:
+
+<Steps>
+  <Step title="Data Loading">
+    Load and preprocess training data from S3 or local storage. PDF pages are cached locally and converted to images with anchor text.
+  </Step>
+  
+  <Step title="Model Initialization">
+    Load the base model (Qwen2-VL or Molmo) with optional flash attention and apply LoRA adapters.
+  </Step>
+  
+  <Step title="Training Loop">
+    Train using HuggingFace Trainer with gradient accumulation, checkpointing, and evaluation.
+  </Step>
+  
+  <Step title="Checkpoint Management">
+    Save checkpoints to S3 or local storage, with automatic best model selection.
+  </Step>
+  
+  <Step title="Adapter Merging">
+    Merge LoRA adapters back into the base model for deployment.
+  </Step>
+</Steps>
+
+## WandB Integration
+
+olmOCR integrates with Weights & Biases for experiment tracking and visualization.
+
+### Configuration
+
+```yaml
+wandb:
+  project: pdelfin
+  entity: ai2-llm
+  mode: online  # or 'offline'
+```
+
+### Logged Metrics
+
+The training loop automatically logs:
+- Training loss
+- Evaluation loss per validation dataset
+- Learning rate schedule
+- Gradient norms
+- LoRA configuration
+- Training hyperparameters
+- Beaker job information (if running on Beaker)
+
+```python train/train.py
+def update_wandb_config(config: TrainConfig, trainer: Trainer, model: torch.nn.Module):
+    callbacks = [c for c in trainer.callback_handler.callbacks if isinstance(c, WandbCallback)]
+    wandb_callback = callbacks[0]
+    peft_config = to_native_types(getattr(model, "peft_config", {}))
+    script_config = to_native_types(config)
+    beaker_envs = {k: v for k, v in os.environ.items() if k.lower().startswith("beaker")}
+    
+    wandb.config.update({"peft": peft_config}, allow_val_change=True)
+    wandb.config.update({"script": script_config}, allow_val_change=True)
+    wandb.config.update({"beaker": beaker_envs}, allow_val_change=True)
+```
+
+## Beaker Integration
+
+olmOCR supports distributed training on AI2's Beaker cluster.
+
+### Running on Beaker
+
+Beaker integration provides:
+- Automatic job tracking and metadata
+- Links to Beaker jobs in WandB runs
+- S3 checkpoint synchronization
+- Multi-GPU distributed training
+
+```python train/train.py
+if (run := wandb.run) and (beaker_url := BeakerState().url):
+    run.notes = beaker_url
+```
+
+### Distributed Training
+
+The training script handles distributed setup automatically:
+
+```python train/utils.py
+def get_rank() -> int:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return 0
+```
+
+Only rank 0 processes will:
+- Log to WandB
+- Save checkpoints
+- Display progress bars
+
+## Data Processing
+
+### Dataset Format
+
+olmOCR expects training data in OpenAI batch response format:
+
+```json
+{
+  "custom_id": "s3://bucket/path/doc.pdf__page_1",
+  "response": {
+    "body": {
+      "choices": [{
+        "message": {"content": "extracted text..."},
+        "finish_reason": "stop"
+      }]
+    }
+  }
+}
+```
+
+### Data Preparation
+
+For each training example:
+1. Extract PDF page from S3 or local cache
+2. Generate anchor text from PDF structure
+3. Render PDF page to image at target resolution
+4. Create model-specific input format (Qwen2-VL or Molmo)
+5. Tokenize and prepare labels
+
+```python train/dataprep.py
+def prepare_data_for_qwen2_training(example, processor, target_longest_image_dim, target_anchor_text_len):
+    anchor_text = get_anchor_text(example["local_pdf_path"], example["page_num"], 
+                                  pdf_engine="pdfreport", target_length=target_anchor_text_len)
+    base64_page_image = render_pdf_to_base64png(example["local_pdf_path"], example["page_num"], 
+                                                 target_longest_image_dim=target_longest_image_dim)
+    # ... process and return training tensors
+```
+
+## Installation
+
+Install training dependencies:
+
+```bash
+pip install olmocr[train]
+```
+
+This installs:
+- `torch` and `torchvision`
+- `transformers` (>=4.45.1)
+- `peft` for LoRA
+- `accelerate` for distributed training
+- `datasets` for data loading
+- `wandb` for experiment tracking
+- `s3fs` for S3 access
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Fine-tune Qwen2-VL" icon="robot" href="/training/qwen2vl">
+    Learn how to fine-tune Qwen2-VL models
+  </Card>
+  <Card title="Fine-tune Molmo" icon="brain" href="/training/molmo">
+    Train Molmo models for document understanding
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/training/configuration">
+    Explore all training configuration options
+  </Card>
+  <Card title="Data Preparation" icon="database" href="/data/silver-data">
+    Prepare your own training data
+  </Card>
+</CardGroup>

@@ -1,0 +1,193 @@
+---
+title: "Silver Data Generation"
+description: "API reference for building silver training data using OpenAI's Batch API"
+---
+
+## Overview
+
+The `buildsilver` module provides functionality for generating silver training data from PDF documents using OpenAI's GPT-4o model via the Batch API. It processes PDF pages, extracts anchor text, and constructs queries for vision-language model processing.
+
+## Core Function
+
+### build_page_query
+
+Constructs an OpenAI Batch API request for processing a single PDF page.
+
+```python
+def build_page_query(local_pdf_path: str, pretty_pdf_path: str, page: int) -> dict
+```
+
+<ParamField path="local_pdf_path" type="str" required>
+  Path to the local PDF file to process
+</ParamField>
+
+<ParamField path="pretty_pdf_path" type="str" required>
+  Display-friendly path used in the custom_id field for tracking
+</ParamField>
+
+<ParamField path="page" type="int" required>
+  Page number to process (1-indexed)
+</ParamField>
+
+**Returns:** Dictionary containing OpenAI Batch API request format
+
+#### Example Usage
+
+```python
+from olmocr.data.buildsilver import build_page_query
+
+# Generate a batch query for page 5 of a PDF
+query = build_page_query(
+    local_pdf_path="/path/to/document.pdf",
+    pretty_pdf_path="s3://bucket/document.pdf",
+    page=5
+)
+
+# Write to JSONL file for batch processing
+import json
+with open("batch_requests.jsonl", "a") as f:
+    f.write(json.dumps(query) + "\n")
+```
+
+## OpenAI Batch API Format
+
+The function returns a structured dictionary following OpenAI's Batch API format:
+
+```json
+{
+  "custom_id": "document.pdf-5",
+  "method": "POST",
+  "url": "/v1/chat/completions",
+  "body": {
+    "model": "gpt-4o-2024-08-06",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "[Prompt with anchor text]"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,[base64_encoded_image]"
+            }
+          }
+        ]
+      }
+    ],
+    "temperature": 0.1,
+    "max_tokens": 6000,
+    "logprobs": true,
+    "top_logprobs": 5,
+    "response_format": { /* structured output schema */ }
+  }
+}
+```
+
+### Request Structure
+
+<ParamField path="custom_id" type="string">
+  Format: `{pretty_pdf_path}-{page}` - Used to track results back to source
+</ParamField>
+
+<ParamField path="body.model" type="string">
+  Model: `gpt-4o-2024-08-06` - Vision-capable model for OCR tasks
+</ParamField>
+
+<ParamField path="body.temperature" type="float">
+  Set to `0.1` for more deterministic outputs
+</ParamField>
+
+<ParamField path="body.max_tokens" type="int">
+  Maximum of `6000` tokens for comprehensive page extraction
+</ParamField>
+
+<ParamField path="body.logprobs" type="boolean">
+  Enabled to help identify problematic responses later
+</ParamField>
+
+<ParamField path="body.response_format" type="object">
+  Structured output schema ensuring consistent JSON responses (see [Prompts API](/api/prompts#openai-response-format-schema))
+</ParamField>
+
+## Prompt Construction
+
+The query uses `build_openai_silver_data_prompt()` to create the text component:
+
+```python
+from olmocr.prompts import build_openai_silver_data_prompt
+from olmocr.prompts.anchor import get_anchor_text
+
+# Extract anchor text from PDF
+anchor_text = get_anchor_text(local_pdf_path, page, pdf_engine="pdfreport")
+
+# Build the prompt
+prompt = build_openai_silver_data_prompt(anchor_text)
+```
+
+See [Prompts API](/api/prompts#build-openai-silver-data-prompt) for details on prompt construction.
+
+## Image Processing
+
+Pages are rendered to base64-encoded PNG images at 2048px resolution:
+
+```python
+TARGET_IMAGE_DIM = 2048
+
+image_base64 = render_pdf_to_base64png(local_pdf_path, page, TARGET_IMAGE_DIM)
+```
+
+## Best Practices
+
+<Card title="Use Batch API" icon="layer-group">
+  The Batch API offers 50% cost savings compared to real-time API calls with the same performance.
+</Card>
+
+<Card title="Structured Outputs" icon="brackets-curly">
+  Always use structured outputs for data processing tasks to eliminate LLM "fluff text" and ensure consistent parsing.
+</Card>
+
+<Card title="Schema Ordering" icon="arrow-down-1-9">
+  Fields in your schema are answered in order - place chain-of-thought fields first for better results.
+</Card>
+
+<Card title="Request Logprobs" icon="chart-line">
+  Enable logprobs at no extra cost to identify low-confidence or problematic responses during analysis.
+</Card>
+
+<Card title="Check for Typos" icon="spell-check">
+  Prompt quality directly impacts performance - review prompts carefully before processing thousands of documents.
+</Card>
+
+## Helper Functions
+
+### sample_pdf_pages
+
+```python
+def sample_pdf_pages(num_pages: int, first_n_pages: int, max_sample_pages: int) -> list
+```
+
+Samples pages from a PDF, always including the first N pages and randomly sampling from the rest.
+
+### fetch_s3_file
+
+```python
+def fetch_s3_file(s3_url: str, local_path: str) -> str
+```
+
+Downloads a file from S3 to a local path.
+
+### process_pdf
+
+```python
+def process_pdf(pdf_path: str, first_n_pages: int, max_sample_pages: int, no_filter: bool) -> Generator[dict, None, None]
+```
+
+Processes a complete PDF document, generating batch queries for sampled pages. Supports both local and S3 paths (`s3://bucket/key`).
+
+## Related APIs
+
+- [Prompts API](/api/prompts) - Prompt construction and response schemas
+- [Filter API](/api/filter) - PDF filtering before processing

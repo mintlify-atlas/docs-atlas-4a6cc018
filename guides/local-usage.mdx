@@ -1,0 +1,257 @@
+---
+title: Local Usage Guide
+description: Learn how to convert PDFs locally using olmOCR with GPU acceleration
+---
+
+## Overview
+
+This guide covers how to use olmOCR locally to convert PDFs to structured text. Local usage is ideal for testing, small batches, or when you have a single GPU machine available.
+
+## Prerequisites
+
+Before you begin, ensure you have:
+
+- A recent NVIDIA GPU (tested on RTX 4090, L40S, A100, H100)
+- At least 30GB of free disk space
+- GPU with sufficient memory (40GB+ recommended for optimal performance)
+- Properly configured olmOCR environment (see [Installation](/getting-started/installation))
+
+## Setting Up Your Local Workspace
+
+The pipeline uses a local workspace directory to store:
+- Temporary processing files
+- Work queue state
+- Output results in Dolma format
+
+<Steps>
+  <Step title="Create a workspace directory">
+    Choose a location with sufficient disk space:
+    ```bash
+    mkdir ./localworkspace
+    ```
+  </Step>
+
+  <Step title="Verify your GPU is available">
+    The pipeline automatically checks for GPU availability. If no GPU is detected, you'll see an error message.
+  </Step>
+
+  <Step title="Choose your model">
+    By default, olmOCR uses `allenai/olmOCR-7B-0225-preview` from Hugging Face. You can specify a different model with the `--model` flag.
+  </Step>
+</Steps>
+
+## Converting PDFs
+
+### Single PDF Conversion
+
+Convert a single PDF document:
+
+```bash
+python -m olmocr.pipeline ./localworkspace --pdfs tests/gnarly_pdfs/horribleocr.pdf
+```
+
+This will:
+1. Start an sglang inference server on port 30024
+2. Process each page of the PDF
+3. Save results to `./localworkspace/results/output_*.jsonl`
+
+### Multiple PDF Conversion
+
+Convert multiple PDFs using glob patterns:
+
+```bash
+python -m olmocr.pipeline ./localworkspace --pdfs tests/gnarly_pdfs/*.pdf
+```
+
+You can also specify multiple individual files:
+
+```bash
+python -m olmocr.pipeline ./localworkspace --pdfs file1.pdf file2.pdf file3.pdf
+```
+
+### Converting from a File List
+
+If you have a text file with one PDF path per line:
+
+```bash
+python -m olmocr.pipeline ./localworkspace --pdfs pdf_list.txt
+```
+
+## Configuration Options
+
+### Model Configuration
+
+<ParamField path="--model" type="string" default="allenai/olmOCR-7B-0225-preview">
+  Path to the model on Hugging Face or local filesystem. The model will be downloaded and cached automatically.
+</ParamField>
+
+<ParamField path="--model_max_context" type="integer" default="8192">
+  Maximum context length for the model. Requests exceeding this will automatically reduce anchor text length.
+</ParamField>
+
+<ParamField path="--model_chat_template" type="string" default="qwen2-vl">
+  Chat template format to use with the sglang server. Must match your model's expected format.
+</ParamField>
+
+### Image Processing
+
+<ParamField path="--target_longest_image_dim" type="integer" default="1024">
+  The longest dimension (width or height) for rendered PDF page images. Higher values provide better quality but require more GPU memory and processing time.
+  
+  **Recommendations:**
+  - 1024: Good balance for most documents (default)
+  - 1536: Better quality for dense or small text
+  - 768: Faster processing for simple documents
+</ParamField>
+
+<ParamField path="--target_anchor_text_len" type="integer" default="6000">
+  Maximum characters of anchor text to provide as context to the model. Anchor text is extracted using pdftotext and helps the model understand the page content.
+  
+  This value is automatically reduced if the total context exceeds `--model_max_context`.
+</ParamField>
+
+### Processing Control
+
+<ParamField path="--workers" type="integer" default="8">
+  Number of concurrent workers processing PDFs. More workers can improve throughput but also increase memory usage.
+  
+  **Recommendations:**
+  - 8-16: Single GPU with good memory (40GB+)
+  - 4-8: GPUs with limited memory (24GB)
+  - 1-4: For debugging or memory-constrained environments
+</ParamField>
+
+<ParamField path="--pages_per_group" type="integer" default="500">
+  Target number of PDF pages per work item group. The pipeline samples your PDFs to estimate pages per document and groups work accordingly.
+</ParamField>
+
+<ParamField path="--max_page_retries" type="integer" default="8">
+  Maximum retry attempts for processing a page before falling back to simple text extraction.
+</ParamField>
+
+<ParamField path="--max_page_error_rate" type="float" default="0.004">
+  Maximum allowable rate of failed pages (1/250 by default). Documents exceeding this error rate are discarded.
+</ParamField>
+
+### Filtering
+
+<ParamField path="--apply_filter" type="boolean">
+  Apply automatic filtering to skip:
+  - Non-English documents
+  - Form documents
+  - Likely SEO spam content
+  
+  ```bash
+  python -m olmocr.pipeline ./localworkspace --pdfs *.pdf --apply_filter
+  ```
+</ParamField>
+
+## Example Configurations
+
+### High Quality Processing
+
+For academic papers or documents with dense text:
+
+```bash
+python -m olmocr.pipeline ./localworkspace \
+  --pdfs academic_papers/*.pdf \
+  --target_longest_image_dim 1536 \
+  --target_anchor_text_len 8000 \
+  --workers 4
+```
+
+### Fast Processing
+
+For simple documents where speed is priority:
+
+```bash
+python -m olmocr.pipeline ./localworkspace \
+  --pdfs simple_docs/*.pdf \
+  --target_longest_image_dim 768 \
+  --workers 16 \
+  --apply_filter
+```
+
+### Memory-Constrained GPU
+
+For GPUs with limited memory (e.g., 24GB):
+
+```bash
+python -m olmocr.pipeline ./localworkspace \
+  --pdfs documents/*.pdf \
+  --workers 2 \
+  --target_longest_image_dim 1024
+```
+
+## Understanding the Output
+
+Results are saved in [Dolma format](https://github.com/allenai/dolma) as JSONL files:
+
+```
+./localworkspace/
+├── results/
+│   ├── output_abc123.jsonl
+│   ├── output_def456.jsonl
+│   └── ...
+└── work_queue/
+    └── ...
+```
+
+Each JSONL file contains documents with:
+- `id`: SHA-1 hash of the document text
+- `text`: Extracted text content
+- `metadata`: Processing statistics (tokens, pages, etc.)
+- `attributes.pdf_page_numbers`: Character spans for each page
+
+See [Viewing Results](/guides/viewing-results) for how to visualize and analyze the output.
+
+## Monitoring Progress
+
+The pipeline provides real-time progress information:
+
+```
+2026-03-03 10:15:23 - Pipeline started with PID 12345
+2026-03-03 10:15:45 - sglang server is ready
+2026-03-03 10:15:46 - Worker 0 processing work item abc123
+2026-03-03 10:15:48 - Got 15 pages to do for s3://bucket/doc.pdf in worker 0
+2026-03-03 10:16:02 - Got 1 docs for abc123
+```
+
+Logs are saved to `olmocr-pipeline-debug.log` in the current directory.
+
+## Troubleshooting
+
+### Out of Memory Errors
+
+If you encounter GPU out-of-memory errors:
+
+1. Reduce `--workers` to 1 or 2
+2. Decrease `--target_longest_image_dim` to 768 or 512
+3. Ensure no other processes are using the GPU
+
+### Server Connection Errors
+
+If workers can't connect to the sglang server:
+
+1. Check that port 30024 is not in use
+2. Verify the model loaded successfully in the logs
+3. Ensure sglang is installed correctly (see [Installation](/getting-started/installation))
+
+### Page Processing Failures
+
+When pages fail to process:
+- The pipeline automatically retries up to `--max_page_retries` times
+- If rotation is detected as incorrect, it will retry with rotation correction
+- After max retries, falls back to simple pdftotext extraction
+- Documents with too many failures (exceeding `--max_page_error_rate`) are discarded
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="View Results" icon="eye" href="/guides/viewing-results">
+    Learn how to visualize and analyze your converted documents
+  </Card>
+  <Card title="Cluster Processing" icon="server" href="/guides/cluster-usage">
+    Scale up to process millions of PDFs using multiple nodes
+  </Card>
+</CardGroup>

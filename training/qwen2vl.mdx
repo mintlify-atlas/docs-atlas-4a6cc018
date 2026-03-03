@@ -1,0 +1,379 @@
+---
+title: Fine-tuning Qwen2-VL
+description: Train Qwen2-VL models for document OCR with LoRA
+---
+
+## Overview
+
+Qwen2-VL is a family of efficient vision-language models available in 2B and 7B parameter sizes. olmOCR supports fine-tuning both variants using LoRA for parameter-efficient training.
+
+## Model Selection
+
+<CardGroup cols={2}>
+  <Card title="Qwen2-VL-2B" icon="gauge-simple">
+    Faster training and inference, suitable for resource-constrained environments
+  </Card>
+  <Card title="Qwen2-VL-7B" icon="gauge">
+    Better performance on complex documents, recommended for production
+  </Card>
+</CardGroup>
+
+## Quick Start
+
+### Basic Training Command
+
+```bash
+python -m olmocr.train.train \
+  --config olmocr/train/config/qwen2vl-7b-lora.yaml
+```
+
+### Configuration File
+
+Create a configuration file `qwen2vl-custom.yaml`:
+
+```yaml
+model:
+  name_or_path: Qwen/Qwen2-VL-7B-Instruct
+  arch: causal
+  use_flash_attn: true
+
+wandb:
+  project: my-ocr-project
+  entity: my-team
+
+generate:
+  max_length: 8192
+
+train_data:
+  seed: 1337
+  cache_location: /path/to/pdf/cache
+  sources:
+    - name: my_training_data
+      response_glob_path: s3://my-bucket/train/*.json
+      target_longest_image_dim: [1024]
+      target_anchor_text_len: [6000]
+
+valid_data:
+  cache_location: /path/to/pdf/cache
+  metric_for_best_model: my_eval_data_loss
+  sources:
+    - name: my_eval_data
+      response_glob_path: s3://my-bucket/eval/*.json
+      target_longest_image_dim: [1024]
+      target_anchor_text_len: [6000]
+
+hparams:
+  batch_size: 1
+  eval_batch_size: 1
+  gradient_accumulation_steps: 4
+  gradient_checkpointing: true
+  clip_grad_norm: 1.0
+  learning_rate: 1e-4
+  max_steps: 10000
+  log_every_steps: 10
+  eval_every_steps: 100
+  optim: adamw_torch
+  lr_scheduler: cosine
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.05
+  task_type: causal_lm
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+    - visual.blocks.[0-9]+.attn.qkv
+    - visual.blocks.[0-9]+.attn.proj
+    - visual.blocks.[0-9]+.mlp.fc1
+    - visual.blocks.[0-9]+.mlp.fc2
+    - visual.merger.mlp.0
+    - visual.merger.mlp.2
+
+save:
+  path: s3://my-bucket/models/
+  save_every_steps: 1000
+
+max_workers: 10
+```
+
+## Qwen2-VL Specific Configuration
+
+### Flash Attention
+
+Qwen2-VL supports flash attention for faster training:
+
+```yaml
+model:
+  use_flash_attn: true
+```
+
+```python train/train.py
+if "qwen" in config.model.name_or_path.lower():
+    model = Qwen2VLForConditionalGeneration.from_pretrained(
+        config.model.name_or_path, 
+        torch_dtype=torch.bfloat16, 
+        _attn_implementation="flash_attention_2" if config.model.use_flash_attn else None
+    )
+```
+
+<Note>
+Flash attention requires specific GPU architectures (Ampere or newer). Set to `false` if you encounter compatibility issues.
+</Note>
+
+### Target Modules for LoRA
+
+Qwen2-VL requires LoRA adapters on both language and vision components:
+
+<AccordionGroup>
+  <Accordion title="Language Model Modules">
+    ```yaml
+    - q_proj      # Query projection
+    - k_proj      # Key projection
+    - v_proj      # Value projection
+    - o_proj      # Output projection
+    - gate_proj   # MLP gate
+    - up_proj     # MLP up projection
+    - down_proj   # MLP down projection
+    ```
+  </Accordion>
+  
+  <Accordion title="Vision Transformer Modules">
+    ```yaml
+    - visual.blocks.[0-9]+.attn.qkv   # Vision attention
+    - visual.blocks.[0-9]+.attn.proj  # Vision projection
+    - visual.blocks.[0-9]+.mlp.fc1    # Vision MLP layer 1
+    - visual.blocks.[0-9]+.mlp.fc2    # Vision MLP layer 2
+    - visual.merger.mlp.0             # Vision merger layer 1
+    - visual.merger.mlp.2             # Vision merger layer 2
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Image Resolution
+
+Qwen2-VL processes images at configurable resolutions. Higher resolutions capture more detail but increase memory usage:
+
+```yaml
+train_data:
+  sources:
+    - target_longest_image_dim: [1024]  # Single resolution
+    # Or use multiple for data augmentation:
+    - target_longest_image_dim: [768, 1024, 1280]
+```
+
+<Tip>
+For documents with small text, use 1024 or higher. For simpler documents, 768 may suffice.
+</Tip>
+
+## Data Format
+
+### Input Processing
+
+Qwen2-VL uses a chat template format:
+
+```python train/dataprep.py
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image", "image": base64_page_image},
+            {"type": "text", "text": build_finetuning_prompt(anchor_text)},
+        ],
+    }
+]
+text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+```
+
+### Label Preparation
+
+Labels are created by masking the input portion:
+
+```python train/dataprep.py
+# Concatenate input_ids and labels
+input_ids = np.concatenate([inputs.input_ids[0], labels.input_ids[0]], axis=0)
+
+# Create labels, masking the input portion with -100
+labels_full = np.full_like(input_ids, fill_value=-100)
+labels_full[len(inputs.input_ids[0]):] = labels.input_ids[0]
+```
+
+### Collation
+
+Qwen2-VL requires specific tensor formats:
+
+```python train/utils.py
+return {
+    "input_ids": truncated_input_ids,
+    "attention_mask": truncated_attention_mask,
+    "labels": truncated_labels,
+    "pixel_values": torch.tensor(batch[0]["pixel_values"]).unsqueeze(0),
+    "image_grid_thw": torch.tensor(batch[0]["image_grid_thw"]).unsqueeze(0),
+}
+```
+
+## Training Examples
+
+### 2B Model (Single GPU)
+
+```bash
+python -m olmocr.train.train \
+  --model.name_or_path Qwen/Qwen2-VL-2B-Instruct \
+  --model.use_flash_attn true \
+  --hparams.batch_size 1 \
+  --hparams.gradient_accumulation_steps 4 \
+  --hparams.learning_rate 3e-4 \
+  --hparams.max_steps 2000 \
+  --lora.rank 32 \
+  --lora.alpha 32 \
+  --train_data.sources.0.response_glob_path s3://bucket/train/*.json \
+  --valid_data.sources.0.response_glob_path s3://bucket/eval/*.json
+```
+
+### 7B Model (Multi-GPU)
+
+```bash
+torchrun --nproc_per_node=4 -m olmocr.train.train \
+  --config olmocr/train/config/qwen2vl-7b-lora.yaml
+```
+
+### Beaker Cluster
+
+For distributed training on Beaker:
+
+```bash
+beaker experiment create \
+  --name qwen2vl-7b-training \
+  --task-image olmocr:latest \
+  --task-command "python -m olmocr.train.train --config /config.yaml" \
+  --gpus 8 \
+  --priority high
+```
+
+## Checkpoint Handling
+
+### Automatic Checkpointing
+
+Checkpoints are saved automatically based on your configuration:
+
+```yaml
+save:
+  path: s3://my-bucket/models/
+  save_every_steps: 1000
+```
+
+```python train/train.py
+class CheckpointUploadCallback(TrainerCallback):
+    def on_save(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        if state.is_local_process_zero:
+            latest_checkpoint = get_last_checkpoint(args.output_dir)
+            if not latest_checkpoint:
+                return
+            dir_name = Path(latest_checkpoint).name
+            copy_dir(str(latest_checkpoint), f"{self.save_path}/{dir_name}")
+```
+
+### Best Model Selection
+
+The best model is selected based on validation loss:
+
+```yaml
+valid_data:
+  metric_for_best_model: my_eval_data_loss
+```
+
+### Loading Checkpoints
+
+Resume training from a checkpoint:
+
+```bash
+python -m olmocr.train.train \
+  --config config.yaml \
+  --resume_from_checkpoint s3://bucket/models/checkpoint-1000
+```
+
+## Performance Optimization
+
+### Gradient Checkpointing
+
+Enable for large models to reduce memory:
+
+```yaml
+hparams:
+  gradient_checkpointing: true
+```
+
+### Gradient Accumulation
+
+Simulate larger batch sizes:
+
+```yaml
+hparams:
+  batch_size: 1
+  gradient_accumulation_steps: 4  # Effective batch size = 4
+```
+
+### Mixed Precision
+
+BFloat16 is used by default for better numerical stability:
+
+```python train/train.py
+training_args = TrainingArguments(
+    bf16=True,
+    # ... other args
+)
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Out of Memory Errors">
+    Try these solutions:
+    1. Enable gradient checkpointing
+    2. Reduce batch size to 1
+    3. Reduce `target_longest_image_dim` to 768
+    4. Reduce `max_length` to 4096
+    5. Use gradient accumulation instead of larger batches
+  </Accordion>
+  
+  <Accordion title="Flash Attention Errors">
+    If flash attention fails:
+    ```yaml
+    model:
+      use_flash_attn: false
+    ```
+  </Accordion>
+  
+  <Accordion title="Slow Data Loading">
+    Increase workers and cache PDFs locally:
+    ```yaml
+    max_workers: 10
+    train_data:
+      cache_location: /fast/local/storage
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration Reference" icon="book" href="/training/configuration">
+    Explore all configuration options
+  </Card>
+  <Card title="Molmo Training" icon="brain" href="/training/molmo">
+    Try training Molmo models
+  </Card>
+  <Card title="Evaluation" icon="chart-line" href="/evaluation/overview">
+    Evaluate your trained models
+  </Card>
+  <Card title="Cluster Usage" icon="rocket" href="/guides/cluster-usage">
+    Deploy your fine-tuned models at scale
+  </Card>
+</CardGroup>

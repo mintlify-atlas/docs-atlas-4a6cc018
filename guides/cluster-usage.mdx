@@ -1,0 +1,425 @@
+---
+title: Cluster Usage Guide
+description: Scale olmOCR to process millions of PDFs using S3 and multi-node coordination
+---
+
+## Overview
+
+For large-scale PDF processing, olmOCR supports distributed processing across multiple GPU nodes. This mode uses S3 for both input/output and work queue coordination, enabling you to process millions of PDFs efficiently.
+
+## Architecture
+
+Cluster mode uses:
+- **S3 workspace**: Central coordination point for work queue and results
+- **S3 PDF storage**: Source PDFs stored in S3 buckets
+- **Multiple workers**: Independent GPU nodes processing from the shared queue
+- **Work queue**: Automatic work distribution and progress tracking
+
+## Prerequisites
+
+<Steps>
+  <Step title="AWS credentials configured">
+    Ensure you have AWS credentials set up with access to your S3 buckets:
+    ```bash
+    aws configure
+    ```
+  </Step>
+
+  <Step title="S3 bucket access">
+    - Read access to PDF source bucket(s)
+    - Read/write access to workspace bucket
+  </Step>
+
+  <Step title="GPU nodes available">
+    Multiple machines with GPUs, or access to Beaker for Ai2 users
+  </Step>
+</Steps>
+
+## S3-Based Processing
+
+### Setting Up a Workspace
+
+Create a workspace in S3 and add PDFs to process:
+
+```bash
+python -m olmocr.pipeline s3://my_bucket/pdfworkspaces/exampleworkspace \
+  --pdfs s3://my_bucket/source_pdfs/*.pdf
+```
+
+This command:
+1. Creates a work queue in the S3 workspace
+2. Samples PDFs to estimate pages per document
+3. Groups PDFs into work items (default: ~500 pages per group)
+4. Starts processing on the current node
+
+<Note>
+  The first time you run this command, it will populate the work queue. This can take several minutes for millions of PDFs as it samples documents and creates work groups.
+</Note>
+
+### Adding Worker Nodes
+
+On any additional GPU node, simply point to the same workspace:
+
+```bash
+python -m olmocr.pipeline s3://my_bucket/pdfworkspaces/exampleworkspace
+```
+
+Workers will:
+- Automatically pull work items from the queue
+- Process PDFs independently
+- Upload results to `s3://my_bucket/pdfworkspaces/exampleworkspace/results/`
+- Mark work items as complete
+
+### Multiple PDF Sources
+
+You can add PDFs from multiple sources:
+
+```bash
+python -m olmocr.pipeline s3://workspace_bucket/myworkspace \
+  --pdfs s3://source1/pdfs/*.pdf s3://source2/docs/*.pdf
+```
+
+Or from a file containing S3 paths:
+
+```bash
+# Create a text file with one S3 path per line
+cat > pdf_list.txt <<EOF
+s3://bucket1/path/doc1.pdf
+s3://bucket2/path/doc2.pdf
+EOF
+
+python -m olmocr.pipeline s3://workspace/myworkspace \
+  --pdfs pdf_list.txt
+```
+
+## S3 Configuration
+
+### Separate S3 Profiles
+
+If your workspace and PDFs are in different AWS accounts:
+
+<ParamField path="--workspace_profile" type="string">
+  AWS profile name for accessing the workspace bucket
+</ParamField>
+
+<ParamField path="--pdf_profile" type="string">
+  AWS profile name for accessing the PDF source buckets
+</ParamField>
+
+```bash
+python -m olmocr.pipeline s3://workspace_account/workspace \
+  --pdfs s3://pdf_account/pdfs/*.pdf \
+  --workspace_profile workspace_creds \
+  --pdf_profile pdf_creds
+```
+
+## Beaker Integration (Ai2 Users)
+
+For users at the Allen Institute for AI, olmOCR provides native [Beaker](https://www.beaker.org) integration to easily launch distributed processing jobs.
+
+### Quick Start
+
+Launch a cluster job with a single command:
+
+```bash
+python -m olmocr.pipeline s3://my_bucket/workspaces/exampleworkspace \
+  --pdfs s3://my_bucket/pdfs/*.pdf \
+  --beaker \
+  --beaker_gpus 4
+```
+
+This will:
+1. Prepare the workspace locally (sample PDFs, create work queue)
+2. Submit a Beaker experiment with 4 GPU replicas
+3. Each replica will independently process work items from the queue
+4. Return a Beaker experiment URL for monitoring
+
+### Beaker Configuration Options
+
+<ParamField path="--beaker" type="boolean">
+  Enable Beaker submission mode. The pipeline will prepare the workspace locally, then submit to Beaker instead of running inference locally.
+</ParamField>
+
+<ParamField path="--beaker_workspace" type="string" default="ai2/olmocr">
+  Beaker workspace to submit the experiment to.
+  
+  ```bash
+  --beaker_workspace ai2/my-team
+  ```
+</ParamField>
+
+<ParamField path="--beaker_cluster" type="string | list" default="[ai2/jupiter-cirrascale-2, ...]">
+  Beaker cluster(s) to run on. Can specify multiple clusters for better availability.
+  
+  Default clusters:
+  - `ai2/jupiter-cirrascale-2`
+  - `ai2/ceres-cirrascale`
+  - `ai2/neptune-cirrascale`
+  - `ai2/saturn-cirrascale`
+  - `ai2/augusta-google-1`
+  
+  ```bash
+  --beaker_cluster ai2/jupiter-cirrascale-2
+  ```
+</ParamField>
+
+<ParamField path="--beaker_gpus" type="integer" default="1">
+  Number of GPU replicas to run in parallel. More replicas = faster processing.
+  
+  ```bash
+  --beaker_gpus 10  # Launch 10 parallel workers
+  ```
+</ParamField>
+
+<ParamField path="--beaker_priority" type="string" default="normal">
+  Beaker job priority level: `low`, `normal`, `high`, or `urgent`.
+  
+  ```bash
+  --beaker_priority high
+  ```
+</ParamField>
+
+### Beaker Secrets
+
+On first run, the pipeline will prompt you to save AWS and Weka credentials as Beaker secrets:
+
+```
+Expected beaker secrets for accessing Weka and S3 are not found.
+Are you okay to write those to your beaker workspace ai2/olmocr? [y/n]
+```
+
+Required secrets:
+- `{owner}-WEKA_ACCESS_KEY_ID`
+- `{owner}-WEKA_SECRET_ACCESS_KEY`
+- `{owner}-AWS_CREDENTIALS_FILE`
+
+Optional secrets:
+- `OLMOCR_PREVIEW_HF_TOKEN`: For accessing gated Hugging Face models
+- `OE_DATA_GCS_SA_KEY`: For loading models from Google Cloud Storage
+
+### Example Beaker Workflow
+
+Process 1 million PDFs with 20 parallel workers:
+
+```bash
+python -m olmocr.pipeline s3://ai2-llm/pdfworkspaces/arxiv_2024 \
+  --pdfs s3://ai2-llm/arxiv/sources/*.pdf \
+  --beaker \
+  --beaker_gpus 20 \
+  --beaker_cluster ai2/jupiter-cirrascale-2 \
+  --beaker_priority high \
+  --apply_filter
+```
+
+Output:
+```
+Expanded s3 glob at s3://ai2-llm/arxiv/sources/*.pdf
+Found 1,234,567 total pdf paths to add
+Sampling PDFs to calculate optimal length: 100%
+Calculated items_per_group: 50 based on average pages per PDF: 10.2
+Experiment URL: https://beaker.org/ex/01HQXXXXXXXXXXXX
+```
+
+## Monitoring Progress
+
+### Using --stats Flag
+
+Get detailed statistics about your workspace:
+
+```bash
+python -m olmocr.pipeline s3://my_bucket/workspace --stats
+```
+
+Output:
+```
+Work Items Status:
+Total work items: 1,234
+Completed items: 856
+Remaining items: 378
+
+Results:
+Total documents processed: 42,340
+Total documents skipped: 1,205
+Total pages on fallback: 892
+Total pages processed: 423,456
+
+Total output tokens: 156,234,890
+Projected output tokens: 224,567,123
+
+Average pages per doc: 10.0
+Average output tokens per doc: 3,691.2
+Average output tokens per page: 369.1
+
+Long Context Documents (>32768 tokens): 127
+Total tokens in long context documents: 8,234,567
+```
+
+### Monitoring Individual Workers
+
+Each worker outputs progress information:
+
+```
+Queue remaining: 378
+#running-req: 8
+#queue-req: 0
+Worker 3 processing work item def789
+Got 12 pages to do for s3://bucket/paper.pdf in worker 3
+```
+
+### Beaker Web Interface
+
+For Beaker jobs, monitor all replicas at:
+```
+https://beaker.org/ex/{experiment_id}
+```
+
+You can:
+- View logs from each replica
+- Monitor resource usage
+- Check job status and failures
+- Cancel or preempt jobs
+
+## Work Queue Management
+
+### How the Queue Works
+
+1. **Initialization**: The first worker to access a workspace populates the queue
+2. **Work items**: PDFs are grouped into items (~500 pages each by default)
+3. **Distribution**: Workers atomically claim work items from S3
+4. **Results**: Each completed item produces one `output_*.jsonl` file
+5. **Completion tracking**: Work items are marked complete to prevent duplicate processing
+
+### Adjusting Work Group Size
+
+<ParamField path="--pages_per_group" type="integer" default="500">
+  Target number of pages per work group. Larger groups = fewer S3 operations, but less granular progress tracking.
+</ParamField>
+
+```bash
+# For PDFs with many pages (books, reports):
+python -m olmocr.pipeline s3://bucket/workspace \
+  --pdfs s3://bucket/books/*.pdf \
+  --pages_per_group 1000
+
+# For PDFs with few pages (papers, articles):
+python -m olmocr.pipeline s3://bucket/workspace \
+  --pdfs s3://bucket/papers/*.pdf \
+  --pages_per_group 200
+```
+
+## Scaling Best Practices
+
+### Optimal Worker Count
+
+For efficient processing:
+
+1. **Start with 10-20 workers** for most workloads
+2. **Monitor queue depletion rate** using `--stats`
+3. **Add more workers** if queue is draining too slowly
+4. **Reduce workers** if approaching S3 rate limits
+
+### Cost Optimization
+
+<Tip>
+  Use `--apply_filter` to skip non-English, form, and spam documents before processing, potentially saving 20-40% of compute time.
+</Tip>
+
+```bash
+python -m olmocr.pipeline s3://bucket/workspace \
+  --pdfs s3://bucket/webdocs/*.pdf \
+  --beaker --beaker_gpus 15 \
+  --apply_filter
+```
+
+### Handling Failures
+
+- **Worker crashes**: Other workers continue processing; restart crashed workers
+- **Page failures**: Automatic retry up to `--max_page_retries` times
+- **Document failures**: Documents exceeding `--max_page_error_rate` are skipped
+- **Work item failures**: Incomplete items remain in queue for retry
+
+## Output Structure
+
+Results are organized in S3:
+
+```
+s3://my_bucket/pdfworkspaces/exampleworkspace/
+├── work_index_list.csv.zstd    # Work queue state
+└── results/
+    ├── output_abc123.jsonl     # Completed work items
+    ├── output_def456.jsonl
+    └── ...
+```
+
+Each `output_*.jsonl` file contains one or more documents in Dolma format. See [Viewing Results](/guides/viewing-results) for analysis and visualization.
+
+## Example: Processing 1M+ PDFs
+
+<Steps>
+  <Step title="Initialize workspace with PDFs">
+    ```bash
+    python -m olmocr.pipeline s3://ai2-llm/workspaces/production \
+      --pdfs s3://ai2-llm/pdfs/source/*.pdf \
+      --beaker --beaker_gpus 50 \
+      --beaker_priority high \
+      --apply_filter
+    ```
+  </Step>
+
+  <Step title="Monitor progress">
+    ```bash
+    # On local machine, check stats periodically
+    python -m olmocr.pipeline s3://ai2-llm/workspaces/production --stats
+    ```
+  </Step>
+
+  <Step title="Add more workers if needed">
+    ```bash
+    # Submit additional workers to speed up processing
+    python -m olmocr.pipeline s3://ai2-llm/workspaces/production \
+      --beaker --beaker_gpus 25
+    ```
+  </Step>
+
+  <Step title="Collect results">
+    Once complete, results are in:
+    ```
+    s3://ai2-llm/workspaces/production/results/*.jsonl
+    ```
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+### S3 Access Issues
+
+If workers can't access S3:
+
+1. Verify AWS credentials: `aws s3 ls s3://your-bucket/`
+2. Check bucket permissions (read/write for workspace, read for PDFs)
+3. Use `--workspace_profile` and `--pdf_profile` if using multiple accounts
+
+### Work Queue Not Populating
+
+- Ensure the `--pdfs` glob pattern matches files: `aws s3 ls s3://bucket/path/`
+- Check for errors during PDF sampling phase
+- Verify sufficient permissions to write to workspace
+
+### Duplicate Processing
+
+If documents are processed multiple times:
+
+- Check that all workers use the same workspace path (exact match)
+- Ensure workers aren't restarted with `--pdfs` flag (only use on first run)
+- Verify S3 consistency (rare issue in older regions)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="View Results" icon="eye" href="/guides/viewing-results">
+    Learn how to visualize and analyze your converted documents
+  </Card>
+  <Card title="Local Usage" icon="desktop" href="/guides/local-usage">
+    Process PDFs on a single machine for testing and development
+  </Card>
+</CardGroup>

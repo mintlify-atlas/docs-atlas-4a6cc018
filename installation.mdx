@@ -1,0 +1,206 @@
+---
+title: Installation
+description: Install olmOCR and its dependencies for PDF processing
+---
+
+## System Requirements
+
+Before installing olmOCR, ensure your system meets these requirements:
+
+### Hardware Requirements
+
+<CardGroup cols={2}>
+  <Card title="GPU" icon="microchip">
+    Recent NVIDIA GPU with CUDA support
+    
+    **Tested GPUs:**
+    - RTX 4090
+    - L40S
+    - A100
+    - H100
+  </Card>
+  <Card title="Storage" icon="hard-drive">
+    Minimum 30GB of free disk space
+    
+    Required for:
+    - Model weights
+    - Temporary processing files
+    - Output storage
+  </Card>
+</CardGroup>
+
+### Software Requirements
+
+- **Python:** 3.11 or higher (pyproject.toml:20)
+- **CUDA:** Compatible version for your GPU
+- **Operating System:** Ubuntu/Debian (other Linux distributions may work)
+
+<Warning>
+GPU is required for running inference. CPU-only mode is not supported for the inference pipeline.
+</Warning>
+
+## Installation Steps
+
+<Steps>
+  <Step title="Install System Dependencies">
+    Install poppler-utils and additional fonts for rendering PDF images:
+
+    ```bash
+    sudo apt-get update
+    sudo apt-get install poppler-utils ttf-mscorefonts-installer msttcorefonts fonts-crosextra-caladea fonts-crosextra-carlito gsfonts lcdf-typetools
+    ```
+
+    <Note>
+    These fonts are required for properly rendering PDF pages to images.
+    </Note>
+  </Step>
+
+  <Step title="Create Conda Environment">
+    Set up a dedicated conda environment with Python 3.11:
+
+    ```bash
+    conda create -n olmocr python=3.11
+    conda activate olmocr
+    ```
+  </Step>
+
+  <Step title="Clone and Install olmOCR">
+    Clone the repository and install the package:
+
+    ```bash
+    git clone https://github.com/allenai/olmocr.git
+    cd olmocr
+    pip install -e .
+    ```
+
+    This installs all core dependencies including:
+    - **pypdf** (>=5.2.0) - PDF parsing
+    - **pypdfium2** - PDF rendering
+    - **torch** (>=2.5.1) - Deep learning framework
+    - **transformers** (>=4.46.2) - Model loading
+    - **Pillow** - Image processing
+    - And more (see pyproject.toml:21-42 for full list)
+  </Step>
+
+  <Step title="Install SGLang for GPU Inference (Recommended)">
+    For GPU-accelerated inference, install sglang with flashinfer support:
+
+    ```bash
+    pip install sgl-kernel==0.0.3.post1 --force-reinstall --no-deps
+    pip install "sglang[all]==0.4.2" --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
+    ```
+
+    <Tip>
+    This step is optional but **highly recommended** for production use. Without sglang, you won't be able to run GPU inference.
+    </Tip>
+  </Step>
+
+  <Step title="Verify Installation">
+    Verify your installation by checking the package version:
+
+    ```bash
+    python -c "import olmocr; print(olmocr.__version__)"
+    ```
+  </Step>
+</Steps>
+
+## Optional Dependencies
+
+### Development Tools
+
+If you plan to contribute to olmOCR, install the development dependencies:
+
+```bash
+pip install -e ".[dev]"
+```
+
+This includes:
+- Testing tools (pytest, pytest-cov)
+- Code formatters (black, isort, ruff)
+- Type checking (mypy)
+- Documentation tools (Sphinx)
+
+### Training Dependencies
+
+For fine-tuning models, install the training extras:
+
+```bash
+pip install -e ".[train]"
+```
+
+This adds:
+- accelerate - Distributed training
+- peft - Parameter-efficient fine-tuning
+- wandb - Experiment tracking
+- datasets - Data loading
+
+## GPU Configuration
+
+### Memory Requirements
+
+The pipeline automatically adjusts GPU memory usage based on available VRAM:
+
+- **< 60GB VRAM:** Uses 80% memory fraction for KV cache
+- **>= 60GB VRAM:** Uses default memory allocation
+
+<Note>
+The memory fraction is automatically configured in pipeline.py:508 based on your GPU.
+</Note>
+
+### Checking GPU Availability
+
+Verify that PyTorch can detect your GPU:
+
+```bash
+python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'GPU count: {torch.cuda.device_count()}')"
+```
+
+Expected output:
+```
+CUDA available: True
+GPU count: 1
+```
+
+## Troubleshooting
+
+### Poppler Not Found
+
+If you get an error about poppler not being found:
+
+```bash
+# Verify poppler is installed
+pdftoppm -v
+```
+
+If not found, reinstall:
+```bash
+sudo apt-get install --reinstall poppler-utils
+```
+
+### CUDA Version Mismatch
+
+If you encounter CUDA version errors, ensure your PyTorch installation matches your CUDA version:
+
+```bash
+# Check CUDA version
+nvidia-smi
+
+# Install PyTorch with matching CUDA version
+# Visit https://pytorch.org for the correct command
+```
+
+### Font Rendering Issues
+
+If PDFs render with missing characters, ensure all fonts are installed:
+
+```bash
+fc-cache -f -v
+```
+
+## Next Steps
+
+Now that you have olmOCR installed, you're ready to process your first PDF!
+
+<Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+  Learn how to convert PDFs in minutes
+</Card>

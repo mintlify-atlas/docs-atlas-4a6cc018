@@ -1,0 +1,468 @@
+---
+title: Comparing Results
+description: Analyze evaluation results with ELO scoring and HTML review pages
+---
+
+## Overview
+
+olmOCR provides powerful tools for comparing and analyzing evaluation results. The system generates interactive HTML review pages for side-by-side comparisons and supports ELO scoring for ranking multiple OCR tools.
+
+## HTML Evaluation Viewer
+
+The HTML evaluation viewer provides an interactive interface for reviewing and comparing OCR results against gold standard data.
+
+### Review Page Types
+
+Evaluations generate two types of review pages:
+
+<CardGroup cols={2}>
+  <Card title="Worst Results" icon="triangle-exclamation">
+    `{name}_worst.html` - Shows the lowest scoring pages for debugging and identifying systematic issues
+  </Card>
+  
+  <Card title="Random Sample" icon="shuffle">
+    `{name}_sample.html` - Random selection for overall quality assessment
+  </Card>
+</CardGroup>
+
+### Features
+
+The HTML viewer includes:
+
+- **PDF Preview**: Rendered page image for visual reference
+- **Side-by-Side Comparison**: Gold standard vs. evaluation output
+- **Diff Highlighting**: Visual differences with color coding
+- **Alignment Scores**: Quantitative similarity metrics
+- **Randomized Display**: Prevents bias by randomly positioning gold/eval text
+- **Metadata Labels**: Shows which method produced each output
+
+### HTML Structure
+
+Each entry in the review page displays:
+
+```html
+<div class="entry">
+  <!-- Page Image -->
+  <img src="data:image/png;base64,..." />
+  
+  <!-- Metadata -->
+  <div class="info">
+    <a href="{signed_pdf_url}">Download PDF</a>
+    Page: 1 | Alignment: 0.924
+  </div>
+  
+  <!-- Side by Side Text -->
+  <div class="comparison">
+    <div class="left">
+      <h3>Version A (marker)</h3>
+      <p>Text content...</p>
+    </div>
+    <div class="right">
+      <h3>Version B (olmocr)</h3>
+      <p>Text content...</p>
+    </div>
+  </div>
+  
+  <!-- Diff View -->
+  <div class="diff">
+    <span class="removed">Deleted text</span>
+    <span class="added">Added text</span>
+  </div>
+</div>
+```
+
+### Diff Highlighting
+
+The diff view uses color coding to show differences:
+
+<AccordionGroup>
+  <Accordion title="Added Content" icon="plus">
+    <span style={{color: 'green'}}>Green highlighting</span> indicates text present in the evaluation output but not in the reference
+  </Accordion>
+  
+  <Accordion title="Removed Content" icon="minus">
+    <span style={{color: 'red'}}>Red highlighting</span> indicates text missing from the evaluation output
+  </Accordion>
+  
+  <Accordion title="Replaced Content" icon="repeat">
+    Red followed by green indicates text that was changed between versions
+  </Accordion>
+</AccordionGroup>
+
+### Diff Generation
+
+The diff is generated using Python's `SequenceMatcher`:
+
+```python
+from difflib import SequenceMatcher
+
+def generate_diff_html(a, b):
+    seq_matcher = SequenceMatcher(None, a, b)
+    output_html = ""
+    for opcode, a0, a1, b0, b1 in seq_matcher.get_opcodes():
+        if opcode == "equal":
+            output_html += a[a0:a1]
+        elif opcode == "insert":
+            output_html += f"<span class='added'>{b[b0:b1]}</span>"
+        elif opcode == "delete":
+            output_html += f"<span class='removed'>{a[a0:a1]}</span>"
+        elif opcode == "replace":
+            output_html += f"<span class='removed'>{a[a0:a1]}</span>"
+            output_html += f"<span class='added'>{b[b0:b1]}</span>"
+    return output_html
+```
+
+## ELO Scoring System
+
+The ELO scoring system (`buildelo.py`) generates pairwise comparisons between different OCR methods to create relative quality rankings.
+
+### How It Works
+
+<Steps>
+  <Step title="Generate Comparisons">
+    For each PDF, create all possible pairwise comparisons between different parsing methods:
+    
+    ```python
+    from itertools import combinations
+    
+    # If we have outputs from: pdelf, marker, gotocr, mineru
+    # Generate: (pdelf, marker), (pdelf, gotocr), (pdelf, mineru), 
+    #           (marker, gotocr), (marker, mineru), (gotocr, mineru)
+    for compa, compb in combinations(pdf_outputs, 2):
+        # Randomly swap order to prevent bias
+        if random.choice([True, False]):
+            compa, compb = compb, compa
+    ```
+  </Step>
+  
+  <Step title="Calculate Similarity">
+    Compute DocumentEditSimilarity for each pair:
+    
+    ```python
+    alignment = comparer.compute(text_a, text_b)
+    ```
+  </Step>
+  
+  <Step title="Filter Similar Results">
+    Remove comparisons that are too similar (alignment > 0.96) as they provide little information
+  </Step>
+  
+  <Step title="Generate Review Pages">
+    Create HTML pages for human review and voting
+  </Step>
+</Steps>
+
+### Running ELO Evaluation
+
+```bash
+python olmocr/eval/buildelo.py \
+  --name comparison_name \
+  --review_size 50 \
+  --comparisons pdelf marker gotocr_format mineru \
+  --num_copies 3 \
+  --max_workers 8 \
+  s3://bucket/path/to/outputs/
+```
+
+### Command-Line Arguments
+
+<ParamField path="--name" type="string" default="review_page">
+  Base name for generated HTML files
+</ParamField>
+
+<ParamField path="--review_size" type="integer" default="50">
+  Number of comparisons per review page
+</ParamField>
+
+<ParamField path="--comparisons" type="list" default='["pdelf", "marker", "gotocr_format", "mineru"]'>
+  List of method names to compare (must match filename suffixes)
+</ParamField>
+
+<ParamField path="--num_copies" type="integer" default="1">
+  Number of review pages to generate. If > 1, files are named `{name}_0.html`, `{name}_1.html`, etc.
+</ParamField>
+
+<ParamField path="--max_workers" type="integer" default="None">
+  Number of parallel worker processes (defaults to CPU count)
+</ParamField>
+
+<ParamField path="s3_path" type="string" required>
+  Path to folder containing comparison outputs (expects `*.md`, `*.pdf`, `*.png` files)
+</ParamField>
+
+### File Naming Convention
+
+The ELO system expects files to follow this pattern:
+
+```
+outputs/
+├── document.pdf
+├── document_page1_pdelf.md
+├── document_page1_marker.md
+├── document_page1_gotocr_format.md
+├── document_page1_mineru.md
+└── document_page1.png
+```
+
+The method name is extracted from the filename suffix (e.g., `_marker.md` → `marker`).
+
+### Example: Comparing Four Tools
+
+```bash
+python olmocr/eval/buildelo.py \
+  --name ocr_comparison \
+  --review_size 100 \
+  --comparisons olmocr marker gotocr mineru \
+  --num_copies 5 \
+  --max_workers 16 \
+  s3://my-bucket/ocr-outputs/
+```
+
+This generates:
+- `ocr_comparison_0.html` - 100 pairwise comparisons
+- `ocr_comparison_1.html` - Next 100 comparisons
+- `ocr_comparison_2.html` - Next 100 comparisons
+- `ocr_comparison_3.html` - Next 100 comparisons
+- `ocr_comparison_4.html` - Next 100 comparisons
+
+<Info>
+Generating multiple copies allows for distributed human evaluation across team members.
+</Info>
+
+### Comparison Data Structure
+
+Each comparison contains:
+
+```python
+@dataclass
+class Comparison:
+    pdf_path: str                  # Original PDF
+    comparison_a_path: str         # Path to method A output
+    comparison_b_path: str         # Path to method B output
+    comparison_a_str: str          # Method A text
+    comparison_b_str: str          # Method B text
+    alignment: float               # Similarity score
+    
+    @property
+    def comparison_a_method(self):
+        # Extracts method name from path (e.g., "marker")
+        match = re.search(r"page[0-9]+_(\w+)\.md$", self.comparison_a_path)
+        return match.group(1)
+```
+
+## Analyzing Results
+
+### Identifying Systematic Issues
+
+Use the worst results page to identify patterns:
+
+<Steps>
+  <Step title="Review Low Scores">
+    Examine pages with alignment < 0.7 for systematic failures
+  </Step>
+  
+  <Step title="Categorize Errors">
+    Group errors by type:
+    - Missing content (red highlighting)
+    - Hallucinated content (green highlighting)
+    - Structural issues (incorrect ordering)
+    - Formatting problems (table/formula extraction)
+  </Step>
+  
+  <Step title="Identify Patterns">
+    Look for document characteristics that correlate with failures:
+    - Multi-column layouts
+    - Complex tables
+    - Mathematical formulas
+    - Headers/footers
+    - Image captions
+  </Step>
+</Steps>
+
+### Quality Assessment Guidelines
+
+Score interpretation:
+
+<CardGroup cols={3}>
+  <Card title="Excellent" icon="star">
+    **0.95 - 1.00**
+    
+    Near-perfect extraction with minor differences in whitespace or formatting
+  </Card>
+  
+  <Card title="Good" icon="thumbs-up">
+    **0.85 - 0.94**
+    
+    High-quality extraction with some missing or extra content
+  </Card>
+  
+  <Card title="Fair" icon="hand">
+    **0.70 - 0.84**
+    
+    Acceptable quality but notable content issues
+  </Card>
+</CardGroup>
+
+<CardGroup cols={3}>
+  <Card title="Poor" icon="thumbs-down">
+    **0.50 - 0.69**
+    
+    Significant content missing or incorrect
+  </Card>
+  
+  <Card title="Failed" icon="xmark">
+    **0.00 - 0.49**
+    
+    Severe extraction failures or wrong content
+  </Card>
+  
+  <Card title="Error" icon="triangle-exclamation">
+    **N/A**
+    
+    Processing error or timeout
+  </Card>
+</CardGroup>
+
+## Performance Optimization
+
+The comparison system uses parallel processing for efficiency:
+
+### Parallel PDF Processing
+
+```python
+from concurrent.futures import ProcessPoolExecutor
+
+with ProcessPoolExecutor(max_workers=16) as executor:
+    future_to_pdf = {
+        executor.submit(process_pdf, pdf_path): pdf_path 
+        for pdf_path in all_pdfs
+    }
+    
+    for future in tqdm(as_completed(future_to_pdf), total=len(all_pdfs)):
+        pdf_results = future.result()
+        all_comparisons.extend(pdf_results)
+```
+
+### Resource Requirements
+
+For large evaluations:
+
+<Note>
+- **Memory**: ~2GB per worker process
+- **CPU**: Scales linearly with `--max_workers`
+- **Disk**: Minimal (HTML outputs only)
+- **Network**: Required for S3 access
+</Note>
+
+<Tip>
+Set `--max_workers` based on available CPU cores. For S3 data, network bandwidth may be the bottleneck rather than CPU.
+</Tip>
+
+## Viewing HTML Pages
+
+### Local Viewing
+
+Simply open the HTML files in a web browser:
+
+```bash
+# macOS
+open review_page.html
+
+# Linux
+xdg-open review_page.html
+
+# Windows
+start review_page.html
+```
+
+### Serving Over HTTP
+
+For remote access or team collaboration:
+
+```bash
+# Python 3
+python -m http.server 8000
+
+# Then visit: http://localhost:8000/review_page.html
+```
+
+### Sharing Results
+
+The HTML files are self-contained and can be:
+
+- Uploaded to internal web servers
+- Shared via cloud storage (Dropbox, Google Drive)
+- Emailed directly (if file size permits)
+- Hosted on GitHub Pages for public benchmarks
+
+<Warning>
+Be mindful of sensitive data in evaluation results. HTML files contain embedded images and text from processed documents.
+</Warning>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Sample Size" icon="chart-bar">
+    - Use `--review_size 50-100` for thorough manual review
+    - Generate multiple copies (`--num_copies 3-5`) for inter-rater reliability
+    - Always review both worst and random samples
+  </Accordion>
+  
+  <Accordion title="Comparison Selection" icon="list-check">
+    - Include at least 3-4 methods for meaningful ELO rankings
+    - Filter out very similar results (alignment > 0.96) to focus on differences
+    - Randomize comparison order to prevent bias
+  </Accordion>
+  
+  <Accordion title="Error Analysis" icon="microscope">
+    - Start with worst results to identify failure modes
+    - Cross-reference with benchmark property tests
+    - Document systematic issues for targeted improvements
+  </Accordion>
+  
+  <Accordion title="Result Validation" icon="check-double">
+    - Compare page-weighted vs char-weighted metrics
+    - Verify evaluation data matches expected format
+    - Check for processing errors and overruns
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+### Low Alignment Scores
+
+If seeing unexpectedly low scores:
+
+1. **Check text format**: Ensure evaluation output is plain text, not JSON/XML wrapped
+2. **Verify goldkey matching**: Confirm `{s3_path}-{pagenum}` format is consistent
+3. **Inspect HTML diffs**: Look for systematic formatting differences
+4. **Review empty documents**: Empty gold + empty eval = 1.0, but empty gold + content eval = 0.0
+
+### Missing Comparisons
+
+If expected comparisons don't appear:
+
+1. **Verify file naming**: Check that suffixes match `--comparisons` argument
+2. **Check S3 paths**: Ensure glob patterns match file locations
+3. **Review filter threshold**: Lower from 0.96 if too many comparisons filtered out
+
+### Performance Issues
+
+For slow evaluation:
+
+1. **Reduce review size**: Use smaller `--review_size` for testing
+2. **Adjust workers**: Try different `--max_workers` values
+3. **Use local data**: Download S3 data locally for faster access
+4. **Check S3 bandwidth**: Network may be bottleneck for S3 operations
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="olmOCR-Bench" icon="trophy" href="/evaluation/benchmark">
+    Return to benchmark suite documentation
+  </Card>
+  
+  <Card title="Running Evals" icon="play" href="/evaluation/running-evals">
+    Learn about evaluation execution
+  </Card>
+</CardGroup>

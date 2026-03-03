@@ -1,0 +1,98 @@
+---
+title: Introduction
+description: A toolkit for training language models to work with PDF documents in the wild
+---
+
+<img src="https://github.com/user-attachments/assets/d70c8644-3e64-4230-98c3-c52fddaeccb6" alt="olmOCR Logo" width="300"/>
+
+## Welcome to olmOCR
+
+olmOCR is a comprehensive toolkit for training language models to work with PDF documents in the wild. Built by the AllenNLP team at the Allen Institute for Artificial Intelligence (AI2), olmOCR provides everything you need to extract natural text from complex PDFs at scale.
+
+<Note>
+Try the online demo at [https://olmocr.allenai.org/](https://olmocr.allenai.org/)
+</Note>
+
+## Get Started
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Set up olmOCR with GPU support and all dependencies
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Convert your first PDF in minutes
+  </Card>
+  <Card title="Pipeline Documentation" icon="gear" href="/api/pipeline">
+    Full reference for the PDF processing pipeline
+  </Card>
+  <Card title="GitHub Repository" icon="github" href="https://github.com/allenai/olmocr">
+    View source code and contribute
+  </Card>
+</CardGroup>
+
+## Key Features
+
+### Complete PDF Processing Pipeline
+
+olmOCR provides a full end-to-end pipeline for converting millions of PDFs into high-quality text:
+
+- **Smart OCR with ChatGPT 4o** - Prompting strategy for natural text parsing using ChatGPT 4o (buildsilver.py:31)
+- **Side-by-side Evaluation** - Compare different pipeline versions with built-in eval toolkit (runeval.py:32)
+- **Intelligent Filtering** - Basic filtering by language and SEO spam removal (filter.py:33)
+- **Model Fine-tuning** - Fine-tuning code for Qwen2-VL and Molmo-O models (train.py:34)
+- **Scalable Inference** - Process millions of PDFs using Sglang-powered GPU inference (pipeline.py:35)
+- **Visual Results Viewer** - View Dolma docs side-by-side with original PDFs (dolmaviewer.py:36)
+
+### Built for Scale
+
+<CardGroup cols={3}>
+  <Card title="Local Processing" icon="computer">
+    Process PDFs on a single GPU for quick testing
+  </Card>
+  <Card title="Multi-node Support" icon="server">
+    Scale to multiple nodes with AWS S3 coordination
+  </Card>
+  <Card title="Cluster Integration" icon="cloud">
+    Built-in Beaker support for massive parallel processing
+  </Card>
+</CardGroup>
+
+### High-Quality Output
+
+Extracted text is stored in [Dolma](https://github.com/allenai/dolma)-style JSONL format, making it easy to integrate with existing NLP pipelines and datasets.
+
+<Tip>
+olmOCR handles complex PDFs including scanned documents, multi-column layouts, tables, diagrams, and rotated pages.
+</Tip>
+
+## What's Included
+
+The toolkit includes everything you need for PDF processing:
+
+- **Data Processing** - Prompting strategies and silver data generation
+- **Evaluation Tools** - Side-by-side comparison of pipeline outputs  
+- **Content Filtering** - Language detection and spam removal
+- **Training Code** - Fine-tune vision-language models on your data
+- **Inference Pipeline** - Batch processing with GPU acceleration
+- **Visualization** - Preview extracted text alongside original PDFs
+
+## Requirements
+
+<CardGroup cols={2}>
+  <Card title="GPU" icon="microchip">
+    Recent NVIDIA GPU (RTX 4090, L40S, A100, or H100)
+  </Card>
+  <Card title="Storage" icon="hard-drive">
+    30GB of free disk space
+  </Card>
+</CardGroup>
+
+## License
+
+**olmOCR** is licensed under [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0). A full copy of the license can be found [on GitHub](https://github.com/allenai/olmocr/blob/main/LICENSE).
+
+## Team
+
+**olmOCR** is developed and maintained by the AllenNLP team, backed by the Allen Institute for Artificial Intelligence (AI2). AI2 is a non-profit institute with the mission to contribute to humanity through high-impact AI research and engineering.
+
+To learn more about who specifically contributed to this codebase, see [our contributors](https://github.com/allenai/olmocr/graphs/contributors) page.

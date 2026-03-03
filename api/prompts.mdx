@@ -1,0 +1,368 @@
+---
+title: "Prompt Templates"
+description: "API reference for OCR prompt construction and response schemas"
+---
+
+## Overview
+
+The `prompts` module provides functions for building prompts for vision-language models, response format schemas for structured outputs, and dataclasses for handling OCR responses.
+
+## Prompt Construction
+
+### build_openai_silver_data_prompt
+
+Builds the comprehensive prompt used for generating silver training data with GPT-4o.
+
+```python
+def build_openai_silver_data_prompt(base_text: str) -> str
+```
+
+<ParamField path="base_text" type="str" required>
+  Raw anchor text extracted from the PDF page, including position information
+</ParamField>
+
+**Returns:** Formatted prompt string instructing the model on OCR extraction
+
+#### Example Usage
+
+```python
+from olmocr.prompts import build_openai_silver_data_prompt
+from olmocr.prompts.anchor import get_anchor_text
+
+# Extract anchor text from page
+anchor_text = get_anchor_text("/path/to/doc.pdf", page=1, pdf_engine="pdfreport")
+
+# Build the prompt
+prompt = build_openai_silver_data_prompt(anchor_text)
+```
+
+#### Prompt Content
+
+The generated prompt instructs the model to:
+
+1. **Read naturally** - Convert the document page to plain text as if reading naturally
+2. **Format appropriately**:
+   - Equations → LaTeX representation
+   - Tables → Markdown format
+3. **Remove headers/footers** - But keep references and footnotes
+4. **Read handwriting** - Process any natural handwriting present
+5. **Preserve continuity** - Keep partial sentences from previous/next pages intact
+6. **Allow null** - Return null if no readable text exists
+7. **No hallucination** - Only extract text that's actually present
+
+The prompt includes coordinate system information: origin `[0x0]` is in the **lower left corner** of the image.
+
+### build_finetuning_prompt
+
+Builds a simplified prompt for training and running fine-tuned models.
+
+```python
+def build_finetuning_prompt(base_text: str) -> str
+```
+
+<ParamField path="base_text" type="str" required>
+  Raw anchor text extracted from the PDF page
+</ParamField>
+
+**Returns:** Simplified prompt string for fine-tuned model inference
+
+#### Example Usage
+
+```python
+from olmocr.prompts import build_finetuning_prompt
+
+# For fine-tuned model inference
+prompt = build_finetuning_prompt(anchor_text)
+```
+
+This prompt is simplified compared to the silver data prompt, focusing on core OCR extraction without detailed formatting instructions.
+
+### extract_raw_text
+
+Extracts the anchor text component from an existing prompt string.
+
+```python
+def extract_raw_text(prompt: str) -> str
+```
+
+<ParamField path="prompt" type="str" required>
+  Complete prompt string containing RAW_TEXT_START/END markers
+</ParamField>
+
+**Returns:** Extracted anchor text without prompt wrapper
+
+**Raises:** `ValueError` if prompt doesn't contain raw text markers
+
+#### Example Usage
+
+```python
+from olmocr.prompts import extract_raw_text
+
+prompt = "Below is the image...RAW_TEXT_START\nPage content\nRAW_TEXT_END"
+anchor_text = extract_raw_text(prompt)
+# Returns: "Page content"
+```
+
+## Response Schema
+
+### openai_response_format_schema
+
+Returns the structured output schema for OpenAI's JSON mode, ensuring consistent response format.
+
+```python
+def openai_response_format_schema() -> dict
+```
+
+**Returns:** OpenAI-compatible JSON schema dictionary
+
+#### Schema Structure
+
+```json
+{
+  "type": "json_schema",
+  "json_schema": {
+    "name": "page_response",
+    "strict": true,
+    "schema": {
+      "type": "object",
+      "properties": { /* See below */ },
+      "required": [
+        "primary_language",
+        "is_rotation_valid",
+        "rotation_correction",
+        "is_table",
+        "is_diagram",
+        "natural_text"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
+```
+
+#### Response Fields
+
+<ParamField path="primary_language" type="string | null">
+  Two-letter language code (e.g., "en", "es", "fr") or null if no readable text exists
+</ParamField>
+
+<ParamField path="is_rotation_valid" type="boolean">
+  Whether the page is oriented correctly for reading. Only considers textual content, not charts/figures.
+</ParamField>
+
+<ParamField path="rotation_correction" type="integer">
+  Degrees of clockwise rotation needed if page is incorrectly oriented.
+  
+  **Allowed values:** `0`, `90`, `180`, `270`
+  
+  **Default:** `0`
+</ParamField>
+
+<ParamField path="is_table" type="boolean">
+  Whether the majority of page content is in tabular format
+</ParamField>
+
+<ParamField path="is_diagram" type="boolean">
+  Whether the majority of page content is a visual diagram
+</ParamField>
+
+<ParamField path="natural_text" type="string | null">
+  The natural text content extracted from the page, or null if no text should be read
+</ParamField>
+
+#### Example Usage
+
+```python
+from olmocr.prompts import openai_response_format_schema
+from openai import OpenAI
+
+client = OpenAI()
+
+response = client.chat.completions.create(
+    model="gpt-4o-2024-08-06",
+    messages=[...],
+    response_format=openai_response_format_schema()
+)
+
+# Parse the structured response
+import json
+result = json.loads(response.choices[0].message.content)
+print(result["natural_text"])
+```
+
+## PageResponse Dataclass
+
+Typed dataclass for handling OCR responses with validation.
+
+```python
+@dataclass(frozen=True)
+class PageResponse:
+    primary_language: Optional[str]
+    is_rotation_valid: bool
+    rotation_correction: int
+    is_table: bool
+    is_diagram: bool
+    natural_text: Optional[str]
+```
+
+### Validation
+
+The dataclass performs automatic validation in `__post_init__`:
+
+- `rotation_correction` must be one of: `0`, `90`, `180`, `270`
+- Type checking for all fields
+- Raises `ValueError` or `TypeError` for invalid data
+
+### Example Usage
+
+```python
+from olmocr.prompts import PageResponse
+import json
+
+# Parse API response
+response_data = json.loads(api_response)
+
+# Create validated PageResponse
+page = PageResponse(
+    primary_language=response_data["primary_language"],
+    is_rotation_valid=response_data["is_rotation_valid"],
+    rotation_correction=response_data["rotation_correction"],
+    is_table=response_data["is_table"],
+    is_diagram=response_data["is_diagram"],
+    natural_text=response_data["natural_text"]
+)
+
+# Access fields
+if page.natural_text:
+    print(f"Extracted text in {page.primary_language}: {page.natural_text}")
+
+if not page.is_rotation_valid:
+    print(f"Rotate {page.rotation_correction} degrees clockwise")
+```
+
+### Handling Validation Errors
+
+```python
+from olmocr.prompts import PageResponse
+
+try:
+    page = PageResponse(
+        primary_language="en",
+        is_rotation_valid=True,
+        rotation_correction=45,  # Invalid! Must be 0, 90, 180, or 270
+        is_table=False,
+        is_diagram=False,
+        natural_text="Sample text"
+    )
+except ValueError as e:
+    print(f"Invalid rotation: {e}")
+```
+
+## Anchor Text Generation
+
+The `anchor.py` module provides `get_anchor_text()` for extracting positional text from PDFs:
+
+```python
+from olmocr.prompts.anchor import get_anchor_text
+
+anchor_text = get_anchor_text(
+    local_pdf_path="/path/to/doc.pdf",
+    page=1,
+    pdf_engine="pdfreport",
+    target_length=4000
+)
+```
+
+<ParamField path="local_pdf_path" type="str" required>
+  Path to the local PDF file
+</ParamField>
+
+<ParamField path="page" type="int" required>
+  Page number (1-indexed)
+</ParamField>
+
+<ParamField path="pdf_engine" type="Literal" required>
+  Engine to use for text extraction:
+  - `"pdftotext"` - Uses poppler's pdftotext
+  - `"pdfium"` - Uses pdfium library
+  - `"pypdf"` - Uses PyPDF
+  - `"topcoherency"` - Tests multiple engines and picks the most coherent
+  - `"pdfreport"` - Full positional report with images and text coordinates
+</ParamField>
+
+<ParamField path="target_length" type="int" default="4000">
+  Target length for anchor text output (used with pdfreport engine)
+</ParamField>
+
+### PDF Report Format
+
+When using `pdf_engine="pdfreport"`, the output includes:
+
+```
+Page dimensions: 612.0x792.0
+[Image 50x100 to 200x300]
+[72x720]Document Title Here
+[72x680]First paragraph of text...
+[150x400]Table cell content
+```
+
+- **Page dimensions** - Width x Height in points
+- **Images** - `[Image x0xy0 to x1xy1]` format with bounding boxes
+- **Text** - `[xxy]text content` with position coordinates
+- **Origin** - `[0x0]` is in the **lower left corner**
+
+## Complete Example
+
+```python
+from olmocr.prompts import (
+    build_openai_silver_data_prompt,
+    openai_response_format_schema,
+    PageResponse
+)
+from olmocr.prompts.anchor import get_anchor_text
+from openai import OpenAI
+import json
+
+# 1. Extract anchor text
+anchor_text = get_anchor_text(
+    "/path/to/document.pdf",
+    page=1,
+    pdf_engine="pdfreport",
+    target_length=4000
+)
+
+# 2. Build prompt
+prompt = build_openai_silver_data_prompt(anchor_text)
+
+# 3. Call OpenAI API
+client = OpenAI()
+response = client.chat.completions.create(
+    model="gpt-4o-2024-08-06",
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
+            ]
+        }
+    ],
+    temperature=0.1,
+    max_tokens=6000,
+    response_format=openai_response_format_schema()
+)
+
+# 4. Parse and validate response
+result_data = json.loads(response.choices[0].message.content)
+page_result = PageResponse(**result_data)
+
+# 5. Use the extracted data
+if page_result.natural_text:
+    print(f"Language: {page_result.primary_language}")
+    print(f"Content: {page_result.natural_text}")
+```
+
+## Related APIs
+
+- [Silver Data Generation](/api/buildsilver) - Uses these prompts for batch processing
+- [Filter API](/api/filter) - Pre-processing PDF validation

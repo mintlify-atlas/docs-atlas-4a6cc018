@@ -1,0 +1,256 @@
+---
+title: olmOCR-Bench
+description: Automated benchmark suite for evaluating document parsing and OCR tools
+---
+
+## Overview
+
+olmOCR-Bench is an automated benchmark suite designed to effectively evaluate document-level parsing and OCR across various tools. It tests specific "facts" or "properties" about document pages at the PDF level.
+
+<Info>
+We use PDFs directly because PDFs preserve digital metadata and information which is helpful and commonly available. Almost any other format can be converted to PDF, but not the reverse.
+</Info>
+
+## Property Classes
+
+olmOCR-Bench evaluates four main categories of document properties:
+
+### Text Presence/Absence
+
+Ensures that specific pieces of text (1-3 sentence level) are present or absent within parsed documents with high probability.
+
+- Tests documents with ambiguity around headers, footers, and other ambiguous content
+- Uses fuzzy matching to allow for minor variations
+- Validates extraction of critical document content
+
+**JSONL Format:**
+```json
+{
+  "pdf": "document.pdf",
+  "id": "rule_001",
+  "type": "present",
+  "text": "Expected text to find",
+  "threshold": 0.9
+}
+```
+
+### Natural Reading Order
+
+Verifies that blocks of text appear in the correct relative order within the document.
+
+- Ensures proper sequencing of content (e.g., article headings before article text)
+- Critical for multi-column layouts and complex page structures
+- Allows flexibility in ordering independent sections
+
+**JSONL Format:**
+```json
+{
+  "pdf": "document.pdf",
+  "id": "rule_002",
+  "type": "order",
+  "before": "Text that should appear first",
+  "after": "Text that should appear second",
+  "threshold": 0.95
+}
+```
+
+### Table Accuracy
+
+Validates proper extraction and structuring of tabular data.
+
+- Checks accuracy on row/column/title basis
+- Ensures table structure is preserved
+- Verifies cell content extraction
+
+### Formula Accuracy
+
+Evaluates mathematical formula extraction and rendering.
+
+- Extracts formulas from documents
+- Renders extracted formulas
+- Compares rendering using foundation models
+
+<Note>
+Formula accuracy testing is currently in development.
+</Note>
+
+## Benchmark Creation Process
+
+The olmOCR-Bench dataset is created through a systematic process:
+
+<Steps>
+  <Step title="Document Sampling">
+    Sample documents from the same source as olmocrmix, focusing on pages with varied complexity
+  </Step>
+  
+  <Step title="Differential Analysis">
+    Run documents through two models and identify pages with:
+    - Significant plain textual differences
+    - Good text content (not just tables/formulas)
+    - Interesting structural challenges
+  </Step>
+  
+  <Step title="Property Extraction">
+    Extract text presence/absence markers and verify using manual review UI
+  </Step>
+  
+  <Step title="Rule Generation">
+    Write validated rules to JSON format with embedding-based grouping for variation
+  </Step>
+</Steps>
+
+## Running Benchmarks
+
+olmOCR-Bench is designed to be tool-agnostic and doesn't depend on any specific output format.
+
+### Standard Workflow
+
+<Steps>
+  <Step title="Download Dataset">
+    Download the benchmark dataset with all PDFs (single-page) to a `/pdfs` folder
+  </Step>
+  
+  <Step title="Run Extraction">
+    Run your OCR tool on the PDFs and save output to a folder (e.g., `olmocr-v2_1/`)
+    
+    Expected output: `pdf_page1.md` for `/pdfs/pdf_page1.pdf`
+  </Step>
+  
+  <Step title="Run Evaluation">
+    Execute the benchmark evaluation script
+  </Step>
+  
+  <Step title="View Results">
+    Review results and examine failing examples
+  </Step>
+</Steps>
+
+### Running Against Marker
+
+<CodeGroup>
+```bash Installation
+pip install marker-pdf==1.5.4
+```
+
+```bash Execution
+python olmocr/bench/runners/run_marker.py olmocr/bench/sample_data/pdfs
+```
+</CodeGroup>
+
+### Running Against GOT-OCR
+
+<CodeGroup>
+```bash Installation
+pip install verovio torchvision
+```
+
+```bash Execution
+python olmocr/bench/runners/run_gotocr.py olmocr/bench/sample_data/pdfs
+```
+</CodeGroup>
+
+### Running Against MinerU
+
+<CodeGroup>
+```bash Environment Setup
+conda create -n MinerU python=3.10
+conda activate MinerU
+```
+
+```bash Installation
+pip install -U magic-pdf[full]==1.1.0 --extra-index-url https://wheels.myhloli.com
+pip install huggingface_hub
+```
+
+```bash Download Models
+wget https://github.com/opendatalab/MinerU/raw/master/scripts/download_models_hf.py -O download_models_hf.py
+python download_models_hf.py
+```
+
+```bash Execution
+python olmocr/bench/runners/run_mineru.py olmocr/bench/sample_data/pdfs
+```
+</CodeGroup>
+
+## Benchmark Script Usage
+
+Run the benchmark evaluation script:
+
+```bash
+python olmocr/bench/benchmark.py --input_folder path/to/benchmark/data
+```
+
+### Input Folder Structure
+
+Your benchmark folder should be organized as:
+
+```
+benchmark_data/
+├── pdfs/                 # Input PDF files
+│   ├── doc1.pdf
+│   ├── doc2.pdf
+│   └── doc3.pdf
+├── rules.jsonl          # Benchmark rules
+├── marker/              # Marker tool output
+│   ├── doc1_1.md
+│   ├── doc1_2.md        # Multiple runs for same doc
+│   └── doc2_1.md
+└── olmocr/              # olmOCR output
+    ├── doc1_1.md
+    └── doc2_1.md
+```
+
+### Output Format
+
+The benchmark script outputs:
+
+- **Per-Candidate Results**: Detailed pass/fail for each rule
+- **Overall Score**: Average percentage across all rules
+- **Rule Type Breakdown**: Performance by property class
+- **Failure Explanations**: Specific reasons for failed rules
+
+**Example Output:**
+```
+Candidate: marker
+  [FAIL] Rule rule_001 on doc1 average pass ratio: 0.667 (2/3 repeats passed).
+  Average Score: 87.5% over 24 rules.
+
+Candidate: olmocr
+  Average Score: 94.2% over 24 rules.
+
+Final Summary:
+marker              : Average Score: 87.5% over  24 rules
+  Breakdown by rule type:
+    present : 92.3% average pass rate over 12 rules
+    order   : 81.7% average pass rate over 10 rules
+    absent  : 95.0% average pass rate over 2 rules
+    
+olmocr              : Average Score: 94.2% over  24 rules
+  Breakdown by rule type:
+    present : 96.8% average pass rate over 12 rules
+    order   : 90.5% average pass rate over 10 rules
+    absent  : 97.5% average pass rate over 2 rules
+```
+
+## Multiple Generations
+
+olmOCR-Bench supports evaluating multiple runs of the same document:
+
+- Name files with suffixes: `doc1_1.md`, `doc1_2.md`, `doc1_3.md`
+- Scores are averaged across all generations
+- Useful for evaluating consistency and stability
+
+<Tip>
+Running multiple generations helps identify tools that produce inconsistent results across runs.
+</Tip>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Running Evaluations" icon="play" href="/evaluation/running-evals">
+    Learn how to run detailed evaluations with metrics
+  </Card>
+  <Card title="Comparing Results" icon="chart-line" href="/evaluation/comparing-results">
+    Analyze and compare evaluation results
+  </Card>
+</CardGroup>

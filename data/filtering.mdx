@@ -1,0 +1,563 @@
+---
+title: PDF Filtering
+description: Filter PDFs by language, detect forms, and remove SEO spam
+---
+
+## Overview
+
+The `PdfFilter` class provides automated filtering to exclude low-quality or irrelevant PDFs from your dataset. It combines language detection, form detection, and spam filtering to ensure high-quality training and test data.
+
+<Info>
+Filtering is enabled by default in both `buildsilver.py` and `buildtestset.py`. Use `--no_filter` to disable.
+</Info>
+
+## Quick Start
+
+```python
+from olmocr.filter import PdfFilter
+from lingua import Language
+
+# Create filter with default settings
+filter = PdfFilter()
+
+# Check if a PDF should be filtered out
+if filter.filter_out_pdf("/path/to/document.pdf"):
+    print("PDF filtered out")
+else:
+    print("PDF is good to use")
+```
+
+## PdfFilter Class
+
+### Constructor
+
+```python
+filter = PdfFilter(
+    languages_to_keep=[Language.ENGLISH],
+    apply_form_check=True,
+    apply_download_spam_check=True,
+    download_spam_threshold=0.004
+)
+```
+
+<ParamField path="languages_to_keep" type="list" default="[Language.ENGLISH]">
+  List of languages to keep. PDFs in other languages are filtered out.
+  Use `lingua.Language` enum values.
+</ParamField>
+
+<ParamField path="apply_form_check" type="boolean" default="true">
+  Whether to filter out PDF forms
+</ParamField>
+
+<ParamField path="apply_download_spam_check" type="boolean" default="true">
+  Whether to filter out SEO spam PDFs
+</ParamField>
+
+<ParamField path="download_spam_threshold" type="float" default="0.004">
+  Threshold for spam word frequency (0.4% of words)
+</ParamField>
+
+### Main Method
+
+```python
+filter.filter_out_pdf(local_pdf_path: str) -> bool
+```
+
+Returns `True` if the PDF should be filtered out, `False` if it should be kept.
+
+## Language Detection
+
+The filter uses the [Lingua](https://github.com/pemistahl/lingua-py) library for accurate language detection (filter.py:23-24):
+
+```python
+self.language_detector = LanguageDetectorBuilder
+    .from_all_languages()
+    .with_preloaded_language_models()
+    .build()
+```
+
+### How It Works
+
+1. Extract first 5 pages of text using `pdftotext` (filter.py:79-89)
+2. Detect language using Lingua
+3. Filter out if language not in `languages_to_keep`
+
+<CodeGroup>
+
+```python filter.py:79-105
+# Read the first five pages of text for language calculation
+pdftotext_result = subprocess.run(
+    ["pdftotext", "-f", "1", "-l", "5", local_pdf_path, "-"],
+    timeout=60,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+)
+
+if pdftotext_result.returncode != 0:
+    return True  # Filter out
+
+base_text = pdftotext_result.stdout.decode("utf-8")
+
+# Check minimum text requirements
+if len(base_text) < 200:
+    return False  # Keep - not enough text to analyze
+
+alpha_count = sum(c.isalpha() for c in base_text)
+if alpha_count / len(base_text) < 0.50:
+    return False  # Keep - might be OCRed badly
+
+# Language check
+language = self.language_detector.detect_language_of(base_text)
+if language not in self.languages_to_keep:
+    logger.info(f"Filtering out {local_pdf_path} because language was {language}")
+    return True  # Filter out
+```
+
+```python Example Usage
+from lingua import Language
+
+# Keep English and Spanish
+filter = PdfFilter(
+    languages_to_keep=[Language.ENGLISH, Language.SPANISH]
+)
+
+# Keep English and None (undetectable, might be OCR)
+filter = PdfFilter(
+    languages_to_keep=[Language.ENGLISH, None]
+)
+```
+
+</CodeGroup>
+
+### Safe-side Heuristics
+
+The filter errs on the side of keeping PDFs in edge cases:
+
+<Accordion title="Why keep PDFs with < 200 characters?">
+  PDFs with very little text might be:
+  - Image-heavy documents
+  - Scanned documents with poor initial OCR
+  - Diagrams or charts
+  
+  These could still be valuable for vision-based OCR training, so they're kept.
+</Accordion>
+
+<Accordion title="Why keep PDFs with < 50% alphabetic characters?">
+  Low alphabetic ratio might indicate:
+  - Mathematical equations (lots of symbols)
+  - Tables with numbers
+  - Badly OCR'd text
+  
+  These are potentially useful, so they're kept rather than filtered.
+</Accordion>
+
+## Form Detection
+
+PDF forms are filtered out because they often contain fillable fields rather than natural text (filter.py:29-33):
+
+```python
+def _is_form(self, pdf_reader) -> bool:
+    # Check if the PDF is a form
+    if pdf_reader.get_form_text_fields():
+        return True
+    return False
+```
+
+### Why Filter Forms?
+
+PDF forms are problematic for OCR training:
+- Contain structured field labels, not natural text
+- Often have empty fillable regions
+- Layout is optimized for data entry, not reading
+- May have form-specific metadata
+
+### Example
+
+```python
+# Filter out forms
+filter = PdfFilter(apply_form_check=True)
+
+# Keep forms (not recommended)
+filter = PdfFilter(apply_form_check=False)
+```
+
+## SEO Spam Detection
+
+The spam detector identifies PDFs created for SEO manipulation or illegal downloads (filter.py:35-62).
+
+### Spam Word List
+
+Targeted keywords (filter.py:36-49):
+
+```python
+seo_words = {
+    "download",
+    "pdf",
+    "epub",
+    "mobi",
+    "free",
+    "ebook",
+    "file",
+    "save",
+    "casino",
+    "viagra",
+    "cialis",
+    "ciprofloxacin",
+}
+```
+
+### Spam Detection Algorithm
+
+```python
+def _is_download_spam(self, base_text: str) -> bool:
+    base_text = base_text.strip().lower()
+    clean_text = re.sub(r"\W+", " ", base_text)
+    
+    word_counts = Counter(clean_text.split())
+    total_words = len(clean_text.split())
+    
+    if total_words == 0:
+        return False
+    
+    seo_score = sum(word_counts[word] for word in seo_words if word in word_counts)
+    
+    return (seo_score / total_words) > self.download_spam_threshold
+```
+
+<Steps>
+  <Step title="Normalize text">
+    Convert to lowercase and remove special characters
+  </Step>
+  
+  <Step title="Count spam words">
+    Count occurrences of each spam keyword
+  </Step>
+  
+  <Step title="Calculate ratio">
+    Compute spam words / total words
+  </Step>
+  
+  <Step title="Compare to threshold">
+    Filter out if ratio > 0.004 (0.4%)
+  </Step>
+</Steps>
+
+### Threshold Tuning
+
+```python
+# More aggressive spam filtering (filter more)
+filter = PdfFilter(download_spam_threshold=0.002)  # 0.2%
+
+# Less aggressive spam filtering (filter less)
+filter = PdfFilter(download_spam_threshold=0.01)   # 1.0%
+
+# Disable spam filtering
+filter = PdfFilter(apply_download_spam_check=False)
+```
+
+<Warning>
+Too low a threshold may filter out legitimate documents that happen to mention "download" or "PDF" frequently (like software manuals).
+</Warning>
+
+## Filter Configuration Examples
+
+### Default Configuration
+
+Used by `buildsilver.py` and `buildtestset.py`:
+
+```python
+from olmocr.filter import PdfFilter
+
+pdf_filter = PdfFilter()
+# Keeps: English only
+# Filters: Forms, spam, non-English
+```
+
+### Multilingual Dataset
+
+```python
+from lingua import Language
+
+filter = PdfFilter(
+    languages_to_keep=[
+        Language.ENGLISH,
+        Language.SPANISH,
+        Language.FRENCH,
+        Language.GERMAN,
+    ]
+)
+```
+
+### Permissive Filtering
+
+```python
+# Keep more documents, including possible OCR failures
+filter = PdfFilter(
+    languages_to_keep=[Language.ENGLISH, None],
+    apply_form_check=False,
+    download_spam_threshold=0.01
+)
+```
+
+### Strict Filtering
+
+```python
+# Very aggressive filtering
+filter = PdfFilter(
+    languages_to_keep=[Language.ENGLISH],
+    apply_form_check=True,
+    apply_download_spam_check=True,
+    download_spam_threshold=0.002
+)
+```
+
+### No Filtering
+
+```python
+# Disable all filters (not recommended)
+filter = PdfFilter(
+    languages_to_keep=[],  # Keep all languages
+    apply_form_check=False,
+    apply_download_spam_check=False
+)
+
+# Or use --no_filter flag in scripts
+```
+
+## Integration with Data Tools
+
+### buildsilver.py
+
+Filtering is applied during PDF processing (buildsilver.py:25, 114-116):
+
+```python
+pdf_filter = PdfFilter()
+
+def process_pdf(pdf_path: str, ..., no_filter: bool):
+    if (not no_filter) and pdf_filter.filter_out_pdf(local_pdf_path):
+        print(f"Skipping {local_pdf_path} due to common filter")
+        return []
+    # Continue processing...
+```
+
+Disable filtering:
+
+```bash
+python -m olmocr.data.buildsilver \
+  --glob_path "data/*.pdf" \
+  --no_filter
+```
+
+### buildtestset.py
+
+Same filtering logic (buildtestset.py:17, 75-77):
+
+```python
+pdf_filter = PdfFilter()
+
+def process_pdf(pdf_path: str, ..., no_filter: bool, ...):
+    if (not no_filter) and pdf_filter.filter_out_pdf(local_pdf_path):
+        print(f"Skipping {local_pdf_path} due to filter.")
+        return False
+    # Continue processing...
+```
+
+Disable filtering:
+
+```bash
+python -m olmocr.data.buildtestset \
+  --glob_path "data/*.pdf" \
+  --no_filter
+```
+
+## Batch Processing Example
+
+The filter can be used for large-scale PDF curation (filter.py:127-204):
+
+```python
+import tempfile
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+import boto3
+from tqdm import tqdm
+
+def process_pdf(s3_path):
+    s3 = boto3.client("s3")
+    bucket, key = parse_s3_path(s3_path)
+    
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp_file:
+        s3.download_fileobj(bucket, key, tmp_file)
+        tmp_file.flush()
+        
+        if filter.filter_out_pdf(tmp_file.name):
+            return s3_path, "remove"
+        else:
+            return s3_path, "keep"
+
+filter = PdfFilter(
+    languages_to_keep={Language.ENGLISH, None},
+    apply_download_spam_check=True,
+    apply_form_check=True,
+)
+
+# Load S3 paths
+with open("s3_paths.txt", "r") as f:
+    s3_paths = [line.strip() for line in f]
+
+# Process in parallel
+with open("keep.txt", "w") as fkeep, open("remove.txt", "w") as fremove:
+    with ProcessPoolExecutor(max_workers=20) as executor:
+        pending = {}
+        
+        for s3_path in tqdm(s3_paths):
+            future = executor.submit(process_pdf, s3_path)
+            pending[future] = s3_path
+        
+        for future in as_completed(pending):
+            s3_path, result = future.result()
+            if result == "keep":
+                fkeep.write(s3_path + "\n")
+            else:
+                fremove.write(s3_path + "\n")
+```
+
+## Performance Considerations
+
+### pdftotext Dependency
+
+The filter requires `pdftotext` to be installed:
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install poppler-utils
+
+# macOS
+brew install poppler
+
+# Verify installation
+pdftotext -v
+```
+
+### Timeout Protection
+
+The filter has a 60-second timeout for text extraction (filter.py:79-81):
+
+```python
+pdftotext_result = subprocess.run(
+    ["pdftotext", "-f", "1", "-l", "5", local_pdf_path, "-"],
+    timeout=60,  # Prevent hanging on corrupt PDFs
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+)
+```
+
+### Error Handling
+
+The filter is defensive and filters out problematic PDFs (filter.py:66-76):
+
+```python
+try:
+    pdf_reader = PdfReader(local_pdf_path)
+    
+    if self.apply_form_check and self._is_form(pdf_reader):
+        return True  # Filter out
+except Exception as e:
+    logger.warning(f"Error reading PDF {local_pdf_path}: {e}")
+    return True  # Filter out the PDF if an exception occurs
+```
+
+Corrupt or unreadable PDFs are always filtered out.
+
+## Logging
+
+The filter logs its decisions (filter.py:10-11):
+
+```python
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+```
+
+Example log output:
+
+```
+INFO:olmocr.filter.filter:Filtering out document.pdf because it's a form
+INFO:olmocr.filter.filter:Filtering out spam.pdf because of SEO/download spam
+INFO:olmocr.filter.filter:Filtering out french.pdf because language was FRENCH
+INFO:olmocr.filter.filter:Keeping short.pdf on the safe side because not enough text exists
+```
+
+## Common Filtering Scenarios
+
+<AccordionGroup>
+  <Accordion title="Research papers in English">
+    ```python
+    filter = PdfFilter(
+        languages_to_keep=[Language.ENGLISH],
+        apply_form_check=True,
+        apply_download_spam_check=True,
+        download_spam_threshold=0.004
+    )
+    ```
+    
+    Keeps: Academic PDFs, books, articles
+    Filters: Forms, spam, non-English
+  </Accordion>
+  
+  <Accordion title="Scanned documents (may have OCR errors)">
+    ```python
+    filter = PdfFilter(
+        languages_to_keep=[Language.ENGLISH, None],
+        apply_form_check=False,
+        apply_download_spam_check=True,
+        download_spam_threshold=0.01
+    )
+    ```
+    
+    Keeps: Documents even if language detection fails
+    Less aggressive on spam threshold
+  </Accordion>
+  
+  <Accordion title="Multilingual corpus">
+    ```python
+    from lingua import Language
+    
+    filter = PdfFilter(
+        languages_to_keep=[
+            Language.ENGLISH,
+            Language.SPANISH,
+            Language.FRENCH,
+            Language.GERMAN,
+            Language.CHINESE,
+            Language.JAPANESE,
+        ],
+        apply_form_check=True,
+        apply_download_spam_check=True
+    )
+    ```
+  </Accordion>
+  
+  <Accordion title="Maximum data retention">
+    ```python
+    # Keep almost everything
+    filter = PdfFilter(
+        languages_to_keep=list(Language),  # All languages
+        apply_form_check=False,
+        apply_download_spam_check=False
+    )
+    ```
+    
+    Or just use `--no_filter` flag.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Silver Data" icon="sparkles" href="/data/silver-data">
+    Generate training data with filtering
+  </Card>
+  <Card title="Test Sets" icon="vial" href="/data/test-sets">
+    Build filtered test datasets
+  </Card>
+</CardGroup>

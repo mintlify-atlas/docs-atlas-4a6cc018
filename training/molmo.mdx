@@ -1,0 +1,439 @@
+---
+title: Fine-tuning Molmo
+description: Train Molmo models for advanced document understanding
+---
+
+## Overview
+
+Molmo is a family of advanced multimodal models from AI2, designed for strong vision-language understanding. olmOCR supports fine-tuning Molmo-7B-O with LoRA for document OCR tasks.
+
+## Model Architecture
+
+Molmo uses a unique architecture:
+- **Vision Backbone**: Custom vision encoder with image projector
+- **Language Model**: Transformer-based causal LM
+- **Integration**: Vision features are injected into language model inputs
+
+<Info>
+Molmo models often achieve better performance on complex documents compared to Qwen2-VL, especially for understanding document layout and structure.
+</Info>
+
+## Quick Start
+
+### Basic Training Command
+
+```bash
+python -m olmocr.train.train \
+  --config olmocr/train/config/molmo-o-lora.yaml
+```
+
+### Configuration File
+
+Create `molmo-custom.yaml`:
+
+```yaml
+model:
+  name_or_path: allenai/Molmo-7B-O-0924
+  arch: causal
+  use_flash_attn: true
+
+wandb:
+  project: molmo-ocr
+  entity: my-team
+
+generate:
+  max_length: 4096
+
+train_data:
+  seed: 1337
+  cache_location: /path/to/pdf/cache
+  sources:
+    - name: training_documents
+      response_glob_path: /data/train/*.json
+      target_longest_image_dim: [1024]
+      target_anchor_text_len: [6000]
+
+valid_data:
+  cache_location: /path/to/pdf/cache
+  metric_for_best_model: validation_loss
+  sources:
+    - name: eval_documents
+      response_glob_path: /data/eval/*.json
+      target_longest_image_dim: [1024]
+      target_anchor_text_len: [6000]
+
+hparams:
+  batch_size: 1
+  eval_batch_size: 1
+  gradient_accumulation_steps: 4
+  gradient_checkpointing: true
+  find_unused_parameters: true  # Important for Molmo!
+  clip_grad_norm: 1.0
+  learning_rate: 1e-4
+  max_steps: 10000
+  log_every_steps: 10
+  eval_every_steps: 100
+  optim: adamw_torch
+  lr_scheduler: cosine
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.05
+  task_type: CAUSAL_LM
+  target_modules:
+    # Main transformer attention and feedforward
+    - att_proj 
+    - ff_proj
+    - attn_out
+    - ff_out
+    # Vision transformer
+    - attention.wq
+    - attention.wk
+    - attention.wv
+    - attention.wo
+    - feed_forward.w1
+    - feed_forward.w2
+    # Image projector
+    - vision_backbone.image_projector.w1
+    - vision_backbone.image_projector.w2
+    - vision_backbone.image_projector.w3
+
+save:
+  path: s3://my-bucket/molmo-models/
+  save_every_steps: 1000
+
+max_workers: 10
+```
+
+## Molmo-Specific Configuration
+
+### Model Loading
+
+Molmo requires custom model classes:
+
+```python train/train.py
+from .molmo.config_molmo import MolmoConfig
+from .molmo.modeling_molmo import MolmoForCausalLM
+
+model_config = MolmoConfig.from_pretrained(config.model.name_or_path, trust_remote_code=True)
+
+if model_config.max_position_embeddings < config.generate.max_length:
+    logger.warning(
+        f"ALERT, force adjusting model config max_position_embeddings upwards from {model_config.max_position_embeddings} to {config.generate.max_length}"
+    )
+    model_config.max_position_embeddings = config.generate.max_length
+
+if config.model.use_flash_attn:
+    model_config.attention_type = "flash"
+
+model = MolmoForCausalLM.from_pretrained(
+    config.model.name_or_path, 
+    torch_dtype=torch.bfloat16, 
+    config=model_config, 
+    trust_remote_code=True
+)
+```
+
+### Position Embeddings
+
+Molmo may require adjusting max position embeddings for long contexts:
+
+```yaml
+generate:
+  max_length: 8192  # Automatically adjusts model config if needed
+```
+
+<Warning>
+Increasing `max_length` beyond the pretrained value may affect model quality. Test thoroughly.
+</Warning>
+
+### Find Unused Parameters
+
+Molmo requires setting `find_unused_parameters` for distributed training:
+
+```yaml
+hparams:
+  find_unused_parameters: true
+```
+
+This is necessary because some vision backbone parameters may not receive gradients for all training examples.
+
+## LoRA Target Modules
+
+Molmo has a different architecture than Qwen2-VL, requiring different target modules:
+
+<AccordionGroup>
+  <Accordion title="Language Model Modules">
+    ```yaml
+    - att_proj   # Attention projection
+    - ff_proj    # Feedforward projection
+    - attn_out   # Attention output
+    - ff_out     # Feedforward output
+    ```
+    
+    These modules are in the main transformer blocks.
+  </Accordion>
+  
+  <Accordion title="Vision Transformer Modules">
+    ```yaml
+    - attention.wq        # Vision query weights
+    - attention.wk        # Vision key weights
+    - attention.wv        # Vision value weights
+    - attention.wo        # Vision output weights
+    - feed_forward.w1     # Vision FF layer 1
+    - feed_forward.w2     # Vision FF layer 2
+    ```
+    
+    These adapt the vision encoder.
+  </Accordion>
+  
+  <Accordion title="Image Projector Modules">
+    ```yaml
+    - vision_backbone.image_projector.w1
+    - vision_backbone.image_projector.w2
+    - vision_backbone.image_projector.w3
+    ```
+    
+    The image projector maps vision features to the language model space.
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+Adapting the image projector is crucial for document understanding, as it controls how visual information is presented to the language model.
+</Tip>
+
+## Data Format
+
+### Input Processing
+
+Molmo uses its own processor format:
+
+```python train/dataprep.py
+def prepare_data_for_molmo_training(example, processor, target_longest_image_dim, target_anchor_text_len):
+    anchor_text = get_anchor_text(example["local_pdf_path"], example["page_num"], 
+                                  pdf_engine="pdfreport", target_length=target_anchor_text_len)
+    base64_page_image = render_pdf_to_base64png(example["local_pdf_path"], example["page_num"], 
+                                                 target_longest_image_dim=target_longest_image_dim)
+    
+    main_image = Image.open(BytesIO(base64.b64decode(base64_page_image)))
+    
+    inputs = processor.process(
+        images=[main_image],
+        text=build_finetuning_prompt(anchor_text),
+    )
+    # ... process labels
+```
+
+### Collation
+
+Molmo requires different tensor keys than Qwen2-VL:
+
+```python train/utils.py
+return {
+    "input_ids": truncated_input_ids,
+    "attention_mask": truncated_attention_mask,
+    "labels": truncated_labels,
+    "images": batch[0]["images"].unsqueeze(0),
+    "image_input_idx": batch[0]["image_input_idx"].unsqueeze(0),
+    "image_masks": batch[0]["image_masks"].unsqueeze(0),
+}
+```
+
+<Note>
+Unlike Qwen2-VL's `pixel_values` and `image_grid_thw`, Molmo uses `images`, `image_input_idx`, and `image_masks`.
+</Note>
+
+## Training Examples
+
+### Single GPU Training
+
+```bash
+python -m olmocr.train.train \
+  --model.name_or_path allenai/Molmo-7B-O-0924 \
+  --model.use_flash_attn true \
+  --hparams.batch_size 1 \
+  --hparams.gradient_accumulation_steps 4 \
+  --hparams.find_unused_parameters true \
+  --hparams.learning_rate 1e-4 \
+  --hparams.max_steps 10000 \
+  --lora.rank 32 \
+  --train_data.sources.0.response_glob_path /data/train/*.json \
+  --valid_data.sources.0.response_glob_path /data/eval/*.json
+```
+
+### Multi-GPU Training
+
+```bash
+torchrun --nproc_per_node=8 -m olmocr.train.train \
+  --config olmocr/train/config/molmo-o-lora.yaml
+```
+
+### Extended Context (8K)
+
+For longer documents:
+
+```yaml
+generate:
+  max_length: 8192
+
+train_data:
+  sources:
+    - target_longest_image_dim: [1280]  # Higher resolution
+    target_anchor_text_len: [8000]      # More anchor text
+```
+
+## Memory Optimization
+
+### Gradient Checkpointing
+
+Essential for Molmo-7B:
+
+```yaml
+hparams:
+  gradient_checkpointing: true
+```
+
+### Batch Size Tuning
+
+Molmo typically requires:
+- **Single GPU (A100 40GB)**: batch_size=1, gradient_accumulation=4-8
+- **Single GPU (A100 80GB)**: batch_size=1, gradient_accumulation=2-4
+- **Multi-GPU (8xA100)**: batch_size=1 per GPU, gradient_accumulation=1-2
+
+## Flash Attention
+
+Flash attention is configured differently for Molmo:
+
+```python train/train.py
+if config.model.use_flash_attn:
+    model_config.attention_type = "flash"
+```
+
+<Tip>
+Flash attention provides significant speedups for Molmo, especially with longer sequences.
+</Tip>
+
+## Performance Tuning
+
+### Learning Rate
+
+Molmo typically works well with:
+
+```yaml
+hparams:
+  learning_rate: 1e-4  # Conservative, stable
+  # or
+  learning_rate: 3e-4  # More aggressive
+```
+
+### LoRA Rank
+
+Balance between capacity and efficiency:
+
+```yaml
+lora:
+  rank: 16   # Lightweight, faster
+  # or
+  rank: 32   # Better capacity (recommended)
+  # or  
+  rank: 64   # Maximum capacity, slower
+```
+
+### Warmup Ratio
+
+```yaml
+hparams:
+  warmup_ratio: 0.03  # 3% of training for warmup
+```
+
+## Checkpoint Management
+
+### Saving Checkpoints
+
+```yaml
+save:
+  path: s3://bucket/molmo-checkpoints/
+  save_every_steps: 1000
+```
+
+### Merging Adapters
+
+After training, adapters are automatically merged:
+
+```python train/train.py
+if get_rank() == 0:
+    with get_local_dir(join_path("", save_path, "best")) as best_dir:
+        if config.lora is not None:
+            logger.info("Merging LoRA adapters into the base model...")
+            model = model.merge_and_unload()
+            logger.info("LoRA adapters merged successfully.")
+        
+        model.save_pretrained(best_dir)
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Unused Parameters Warning">
+    This is expected for Molmo. Ensure you have:
+    ```yaml
+    hparams:
+      find_unused_parameters: true
+    ```
+  </Accordion>
+  
+  <Accordion title="Max Position Embeddings Error">
+    The code automatically adjusts this, but you can see the warning:
+    ```
+    ALERT, force adjusting model config max_position_embeddings upwards
+    ```
+    This is normal and expected.
+  </Accordion>
+  
+  <Accordion title="Out of Memory">
+    Try:
+    1. Enable gradient checkpointing (should already be on)
+    2. Reduce `target_longest_image_dim` to 768
+    3. Reduce `max_length` to 4096
+    4. Increase gradient accumulation steps
+  </Accordion>
+  
+  <Accordion title="Slow Training">
+    Enable flash attention and increase workers:
+    ```yaml
+    model:
+      use_flash_attn: true
+    max_workers: 10
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Comparison with Qwen2-VL
+
+| Aspect | Molmo | Qwen2-VL |
+|--------|-------|----------|
+| **Performance** | Better on complex layouts | Faster inference |
+| **Memory** | Higher memory usage | More efficient |
+| **Training Speed** | Slower per step | Faster per step |
+| **Best For** | Complex documents, research | Production, efficiency |
+| **Context Length** | 4K-8K (adjustable) | 4K-8K native |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration Reference" icon="book" href="/training/configuration">
+    Explore all training options
+  </Card>
+  <Card title="Qwen2-VL Training" icon="robot" href="/training/qwen2vl">
+    Compare with Qwen2-VL training
+  </Card>
+  <Card title="Evaluation" icon="chart-line" href="/evaluation/overview">
+    Evaluate Molmo models
+  </Card>
+  <Card title="Data Preparation" icon="database" href="/data/silver-data">
+    Prepare training data
+  </Card>
+</CardGroup>

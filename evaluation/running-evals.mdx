@@ -1,0 +1,368 @@
+---
+title: Running Evaluations
+description: Execute comprehensive evaluations with DocumentEditSimilarity scoring
+---
+
+## Overview
+
+The olmOCR evaluation system (`runeval.py`) provides detailed quantitative analysis of OCR and document parsing quality by comparing outputs against gold standard data. It uses the DocumentEditSimilarity metric from the Dolma Refine project.
+
+## Installation
+
+Install the required evaluation dependencies:
+
+```bash
+pip install git+https://github.com/allenai/refine.git@soldni/eval-m
+```
+
+This provides access to the alignment scoring and metrics used in the evaluation pipeline.
+
+## DocumentEditSimilarity Metric
+
+The evaluation uses DocumentEditSimilarity, a sophisticated metric that:
+
+<AccordionGroup>
+  <Accordion title="Segmentation">
+    Uses SpacySegmenter to break documents into semantic units (sentences, paragraphs)
+  </Accordion>
+  
+  <Accordion title="Alignment">
+    Employs HirschbergAligner to align gold and predicted text segments:
+    - Match score: +1 for matching segments
+    - Mismatch score: -1 for differing segments
+    - Indel score: -1 for insertions/deletions
+  </Accordion>
+  
+  <Accordion title="Similarity Calculation">
+    Computes edit similarity score between 0.0 and 1.0:
+    - 1.0: Perfect match
+    - 0.9-0.99: Excellent quality
+    - 0.7-0.89: Good quality
+    - Below 0.7: Poor quality
+  </Accordion>
+</AccordionGroup>
+
+### Metric Configuration
+
+```python
+from dolma_refine.evaluate.segmenters import SpacySegmenter
+from dolma_refine.evaluate.aligners import HirschbergAligner
+from dolma_refine.evaluate.metrics import DocumentEditSimilarity
+
+segmenter = SpacySegmenter("spacy")
+aligner = HirschbergAligner(
+    match_score=1, 
+    mismatch_score=-1, 
+    indel_score=-1
+)
+comparer = DocumentEditSimilarity(
+    segmenter=segmenter, 
+    aligner=aligner
+)
+
+alignment_score = comparer.compute(gold_text, eval_text)
+```
+
+## Data Format
+
+The evaluation system accepts multiple input formats:
+
+### Normalized Format
+
+```json
+{
+  "s3_path": "s3://bucket/path/to/document.pdf",
+  "pagenum": 1,
+  "text": "Extracted text content...",
+  "finish_reason": "stop",
+  "error": null
+}
+```
+
+### OpenAI Batch API Format
+
+```json
+{
+  "custom_id": "s3://bucket/path/to/document.pdf-1",
+  "response": {
+    "body": {
+      "choices": [{
+        "message": {
+          "content": "{\"natural_text\": \"Extracted text...\"}"
+        },
+        "finish_reason": "stop"
+      }]
+    }
+  }
+}
+```
+
+### Birr Format
+
+```json
+{
+  "custom_id": "s3://bucket/path/to/document.pdf-1",
+  "outputs": [{
+    "text": "{\"natural_text\": \"Extracted text...\"}",
+    "finish_reason": "stop"
+  }],
+  "completion_error": null
+}
+```
+
+<Info>
+The goldkey format is `{s3_path}-{pagenum}`, e.g., `s3://ai2-s2-pdfs/39ce/3db4.pdf-4` for page 4.
+</Info>
+
+## Running Evaluations
+
+### Basic Usage
+
+```bash
+python olmocr/eval/runeval.py \
+  --name experiment_name \
+  --review_size 20 \
+  path/to/gold/data \
+  path/to/eval/data
+```
+
+### Command-Line Arguments
+
+<ParamField path="--name" type="string" default="review_page">
+  Name for this evaluation (used in output files)
+</ParamField>
+
+<ParamField path="--review_size" type="integer" default="20">
+  Number of entries to include in generated HTML review pages
+</ParamField>
+
+<ParamField path="gold_data_path" type="string" required>
+  Path to gold standard JSONL files (local or S3 URL)
+</ParamField>
+
+<ParamField path="eval_data_path" type="string" required>
+  Path to evaluation JSONL files to compare (local or S3 URL)
+</ParamField>
+
+### Example: Evaluating Marker Output
+
+```bash
+python olmocr/eval/runeval.py \
+  --name marker_eval \
+  --review_size 50 \
+  s3://my-bucket/gold-data/ \
+  s3://my-bucket/marker-output/
+```
+
+### Example: Evaluating GOT-OCR Output
+
+```bash
+python olmocr/eval/runeval.py \
+  --name gotocr_eval \
+  --review_size 50 \
+  /path/to/gold/data \
+  /path/to/gotocr/output
+```
+
+### Example: Evaluating MinerU Output
+
+```bash
+python olmocr/eval/runeval.py \
+  --name mineru_eval \
+  --review_size 50 \
+  /path/to/gold/data \
+  /path/to/mineru/output
+```
+
+## Evaluation Workflow
+
+<Steps>
+  <Step title="Load Gold Data">
+    The system loads all JSONL files from the gold data path in parallel:
+    
+    ```python
+    gold_data = load_gold_data(gold_data_path)
+    # Returns: {"s3://path/to/doc.pdf-1": "gold text..."}
+    ```
+    
+    Tracks:
+    - Total entries loaded
+    - Processing errors
+    - Overrun errors (incomplete generations)
+  </Step>
+  
+  <Step title="Process Evaluation Data">
+    For each JSONL file in the evaluation path:
+    
+    ```python
+    process_jsonl_file(jsonl_file, gold_data, comparer)
+    ```
+    
+    Computes:
+    - Alignment score per page
+    - Aggregate statistics
+    - Error tracking
+  </Step>
+  
+  <Step title="Calculate Metrics">
+    Two primary metrics are calculated:
+    
+    **Page-Weighted Score**: Simple average across all pages
+    ```python
+    mean_page_score = total_alignment_score / total_pages
+    ```
+    
+    **Character-Weighted Score**: Weighted by document length
+    ```python
+    mean_char_score = total_char_alignment_score / total_chars
+    ```
+  </Step>
+  
+  <Step title="Generate Review Pages">
+    Creates HTML visualization pages:
+    - `{name}_worst.html`: Lowest scoring pages for debugging
+    - `{name}_sample.html`: Random sample for quality review
+  </Step>
+</Steps>
+
+## Understanding Output
+
+### Console Output
+
+The evaluation prints detailed statistics:
+
+```
+Loaded 15,234 gold data entries for comparison
+Gold processing errors: 12
+Gold overrun errors: 8
+-----------------------------------------------------------
+Found 3 files to evaluate
+Compared 15,180 pages
+Found 15 errors in the eval set, and 23 cases of length overruns
+Mean page-weighted alignment: 0.924
+Mean char-weighted alignment: 0.931
+
+...creating review page
+```
+
+### Key Metrics Explained
+
+<ResponseField name="Loaded entries" type="integer">
+  Number of valid gold standard pages loaded
+</ResponseField>
+
+<ResponseField name="Processing errors" type="integer">
+  Pages that failed to process in gold data
+</ResponseField>
+
+<ResponseField name="Overrun errors" type="integer">
+  Pages where generation exceeded length limits
+</ResponseField>
+
+<ResponseField name="Compared pages" type="integer">
+  Total pages successfully compared
+</ResponseField>
+
+<ResponseField name="Page-weighted alignment" type="float">
+  Average similarity score (each page weighted equally)
+</ResponseField>
+
+<ResponseField name="Char-weighted alignment" type="float">
+  Average similarity score (weighted by document length)
+</ResponseField>
+
+### When to Use Each Metric
+
+<CardGroup cols={2}>
+  <Card title="Page-Weighted" icon="file">
+    Use when all pages are equally important, regardless of length. Better for evaluating consistency across diverse documents.
+  </Card>
+  
+  <Card title="Char-Weighted" icon="align-left">
+    Use when longer documents are more important. Better reflects overall quality of extracted content by volume.
+  </Card>
+</CardGroup>
+
+## Error Handling
+
+The system gracefully handles various error conditions:
+
+### Processing Errors
+
+When a page fails to process:
+```python
+if data.error is not None:
+    eval_text = f"[Error processing this page: {data.error}]"
+```
+
+### Overrun Errors
+
+When generation exceeds limits:
+```python
+if data.finish_reason != "stop":
+    eval_text += f"\n[Error processing this page: overrun {data.finish_reason}]"
+```
+
+### Empty Documents
+
+Empty documents are handled specially:
+```python
+if len(gold_text.strip()) < 3 and len(eval_text.strip()) < 3:
+    alignment = 1.0  # Both empty = perfect match
+```
+
+## Performance Optimization
+
+The evaluation system uses parallel processing for efficiency:
+
+### Multithreaded Loading
+
+```python
+with ThreadPoolExecutor(max_workers=8) as executor:
+    futures = [executor.submit(process_file, path) for path in gold_jsonl_files]
+```
+
+### Multiprocess Evaluation
+
+```python
+with ProcessPoolExecutor() as executor:
+    futures = [executor.submit(process_jsonl_file, file, gold_data, comparer) 
+               for file in jsonl_files]
+```
+
+<Tip>
+For large evaluations, the system automatically uses ProcessPoolExecutor for parallel processing. In debug mode, it switches to ThreadPoolExecutor for easier debugging.
+</Tip>
+
+## Working with S3 Data
+
+The evaluation system seamlessly handles S3 data:
+
+```bash
+# Both paths can be S3 URLs
+python olmocr/eval/runeval.py \
+  s3://bucket/gold-data/ \
+  s3://bucket/eval-data/
+
+# Mixed local and S3
+python olmocr/eval/runeval.py \
+  /local/path/gold-data/ \
+  s3://bucket/eval-data/
+```
+
+Supported S3 file formats:
+- `.json`, `.jsonl`
+- `.json.zstd`, `.jsonl.zstd` (compressed)
+- `.json.zst`, `.jsonl.zst` (compressed)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="View Results" icon="eye" href="/evaluation/comparing-results">
+    Learn how to analyze HTML review pages and compare results
+  </Card>
+  
+  <Card title="ELO Scoring" icon="trophy" href="/evaluation/comparing-results#elo-scoring">
+    Generate ELO rankings for multiple tools
+  </Card>
+</CardGroup>

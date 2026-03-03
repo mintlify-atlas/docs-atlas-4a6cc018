@@ -1,0 +1,505 @@
+---
+title: Anchor Text Extraction
+description: How anchor text improves vision model PDF extraction quality
+---
+
+## What is Anchor Text?
+
+Anchor text is raw text extracted directly from PDFs using traditional OCR engines. It serves as a "hint" or "anchor" to guide the vision-language model in understanding the document's content and structure.
+
+<Note>
+While anchor text may be messy and poorly formatted, it provides crucial context that helps the VLM produce cleaner, more accurate output.
+</Note>
+
+## Why Anchor Text Matters
+
+Vision models alone can struggle with:
+
+- **Small fonts**: Text below a certain size becomes difficult to read in rendered images
+- **Complex layouts**: Multi-column documents, tables, and unusual formatting
+- **Reading order**: Determining the correct sequence of text blocks
+- **Special characters**: Math symbols, Unicode characters, and ligatures
+
+Anchor text provides textual context that complements visual understanding:
+
+<CardGroup cols={2}>
+  <Card title="Content Hints" icon="lightbulb">
+    Raw text gives the model clues about what words appear on the page
+  </Card>
+  <Card title="Structure Context" icon="sitemap">
+    Element positions help the model understand document layout
+  </Card>
+  <Card title="Quality Improvement" icon="chart-line">
+    Combining vision + text yields better results than either alone
+  </Card>
+  <Card title="Fallback Safety" icon="shield">
+    If vision model fails, anchor text provides a basic extraction
+  </Card>
+</CardGroup>
+
+## Extraction Methods
+
+olmOCR supports multiple anchor text extraction engines via the `get_anchor_text()` function:
+
+```python
+def get_anchor_text(
+    local_pdf_path: str,
+    page: int,
+    pdf_engine: Literal["pdftotext", "pdfium", "pypdf", "topcoherency", "pdfreport"],
+    target_length: int = 4000
+) -> str:
+```
+
+### Available Engines
+
+<Tabs>
+  <Tab title="pdfreport (Recommended)">
+    The **pdfreport** engine provides rich structural information about the page:
+
+    ```python
+    anchor_text = get_anchor_text(
+        "document.pdf",
+        page=1,
+        pdf_engine="pdfreport",
+        target_length=6000
+    )
+    ```
+
+    **Output format:**
+    ```
+    Page dimensions: 612.0x792.0
+    [72x720]Introduction
+    [72x680]This document describes the architecture of...
+    [Image 100x400 to 500x600]
+    [72x350]The system consists of three main components:
+    [90x320]1. Data processing pipeline
+    [90x300]2. Model training infrastructure
+    ```
+
+    **Features:**
+    - Text elements with x/y coordinates
+    - Image bounding boxes
+    - Page dimensions
+    - Intelligent sampling when text exceeds `target_length`
+  </Tab>
+
+  <Tab title="pdftotext">
+    Uses Poppler's `pdftotext` command-line tool:
+
+    ```python
+    anchor_text = get_anchor_text(
+        "document.pdf",
+        page=1,
+        pdf_engine="pdftotext"
+    )
+    ```
+
+    **Features:**
+    - Fast and reliable
+    - Good for simple documents
+    - No position information
+    - Used as fallback when vision model fails
+  </Tab>
+
+  <Tab title="pdfium">
+    Uses pypdfium2 library:
+
+    ```python
+    anchor_text = get_anchor_text(
+        "document.pdf",
+        page=1,
+        pdf_engine="pdfium"
+    )
+    ```
+
+    **Features:**
+    - Python-native extraction
+    - No external dependencies
+    - Moderate quality
+  </Tab>
+
+  <Tab title="pypdf">
+    Uses pypdf library's built-in extraction:
+
+    ```python
+    anchor_text = get_anchor_text(
+        "document.pdf",
+        page=1,
+        pdf_engine="pypdf"
+    )
+    ```
+
+    **Features:**
+    - Simple extraction
+    - Already used for PDF metadata
+    - May struggle with complex layouts
+  </Tab>
+
+  <Tab title="topcoherency">
+    Tries all engines and picks the most coherent result:
+
+    ```python
+    anchor_text = get_anchor_text(
+        "document.pdf",
+        page=1,
+        pdf_engine="topcoherency"
+    )
+    ```
+
+    **Process:**
+    1. Extract text with pdftotext, pdfium, and pypdf
+    2. Calculate coherency score for each
+    3. Return the most coherent text
+
+    **Note:** Slower as it runs multiple engines per page
+  </Tab>
+</Tabs>
+
+## pdfreport Implementation
+
+The `pdfreport` engine is the most sophisticated, providing detailed page analysis.
+
+### Page Report Structure
+
+```python
+@dataclass(frozen=True)
+class PageReport:
+    mediabox: BoundingBox
+    text_elements: List[TextElement]
+    image_elements: List[ImageElement]
+
+@dataclass(frozen=True)
+class TextElement(Element):
+    text: str
+    x: float
+    y: float
+
+@dataclass(frozen=True)
+class ImageElement(Element):
+    name: str
+    bbox: BoundingBox
+```
+
+### Extraction Process
+
+From `anchor.py:128-158`:
+
+```python
+def _pdf_report(local_pdf_path: str, page_num: int) -> PageReport:
+    reader = PdfReader(local_pdf_path)
+    page = reader.pages[page_num - 1]
+    resources = page.get("/Resources", {})
+    xobjects = resources.get("/XObject", {})
+    text_elements, image_elements = [], []
+
+    def visitor_body(text, cm, tm, font_dict, font_size):
+        txt2user = _mult(tm, cm)
+        text_elements.append(TextElement(text, txt2user[4], txt2user[5]))
+
+    def visitor_op(op, args, cm, tm):
+        if op == b"Do":
+            xobject_name = args[0]
+            xobject = xobjects.get(xobject_name)
+            if xobject and xobject["/Subtype"] == "/Image":
+                x0, y0 = _transform_point(0, 0, cm)
+                x1, y1 = _transform_point(1, 1, cm)
+                image_elements.append(
+                    ImageElement(xobject_name, BoundingBox(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
+                )
+
+    page.extract_text(visitor_text=visitor_body, visitor_operand_before=visitor_op)
+
+    return PageReport(
+        mediabox=BoundingBox.from_rectangle(page.mediabox),
+        text_elements=text_elements,
+        image_elements=image_elements
+    )
+```
+
+### Linearization Algorithm
+
+The `_linearize_pdf_report()` function converts the page report to a text string with intelligent truncation:
+
+<Steps>
+  <Step title="Add Page Dimensions">
+    ```python
+    result = f"Page dimensions: {report.mediabox.x1:.1f}x{report.mediabox.y1:.1f}\n"
+    ```
+  </Step>
+
+  <Step title="Merge Overlapping Images">
+    Images that overlap or are close together are merged into single elements:
+
+    ```python
+    images = _merge_image_elements(report.image_elements, tolerance=0.5)
+    ```
+
+    This prevents duplicate `[Image ...]` entries for composite images.
+  </Step>
+
+  <Step title="Format Elements">
+    Text elements:
+    ```python
+    text_str = f"[{element.x:.0f}x{element.y:.0f}]{element_text}\n"
+    ```
+
+    Image elements:
+    ```python
+    image_str = f"[Image {element.bbox.x0:.0f}x{element.bbox.y0:.0f} to {element.bbox.x1:.0f}x{element.bbox.y1:.0f}]\n"
+    ```
+  </Step>
+
+  <Step title="Handle Length Limits">
+    If total content exceeds `max_length` (default 4000 chars):
+
+    1. **Identify edge elements**: Elements with min/max x/y coordinates (usually headers, footers, margins)
+    2. **Include edges first**: These provide document structure context
+    3. **Randomly sample remaining**: Fill remaining space with random elements
+    4. **Sort by position**: Maintain logical reading order
+
+    ```python
+    # Find edge elements
+    edge_elements = set()
+    if images:
+        edge_elements.update([
+            min(images, key=lambda e: e.bbox.x0),
+            max(images, key=lambda e: e.bbox.x1),
+            min(images, key=lambda e: e.bbox.y0),
+            max(images, key=lambda e: e.bbox.y1)
+        ])
+
+    if report.text_elements:
+        text_elements = [e for e in report.text_elements if len(e.text.strip()) > 0]
+        edge_elements.update([
+            min(text_elements, key=lambda e: e.x),
+            max(text_elements, key=lambda e: e.x),
+            min(text_elements, key=lambda e: e.y),
+            max(text_elements, key=lambda e: e.y)
+        ])
+
+    # Add edges first, then randomly sample remaining
+    random.shuffle(remaining_elements)
+    for elem in remaining_elements:
+        if current_length + len(elem_str) > max_length:
+            break
+        selected_elements.append(elem)
+
+    # Sort by position for logical order
+    selected_elements.sort(key=lambda x: (x.position[0], x.position[1]))
+    ```
+  </Step>
+</Steps>
+
+### Text Cleanup
+
+Before formatting, text elements are cleaned:
+
+```python
+def _cleanup_element_text(element_text: str) -> str:
+    MAX_TEXT_ELEMENT_LENGTH = 250
+    TEXT_REPLACEMENTS = {
+        "[": "\\[",
+        "]": "\\]",
+        "\n": "\\n",
+        "\r": "\\r",
+        "\t": "\\t"
+    }
+
+    # Fix text encoding issues
+    element_text = ftfy.fix_text(element_text).strip()
+
+    # Escape special characters
+    element_text = text_replacement_pattern.sub(
+        lambda match: TEXT_REPLACEMENTS[match.group(0)],
+        element_text
+    )
+
+    # Truncate long elements
+    return _cap_split_string(element_text, MAX_TEXT_ELEMENT_LENGTH)
+```
+
+<Info>
+Square brackets are escaped because they're used to denote coordinates. Newlines are escaped to maintain single-line format.
+</Info>
+
+## Usage in Pipeline
+
+Anchor text is extracted during the `build_page_query()` function:
+
+```python
+async def build_page_query(local_pdf_path, page, target_longest_image_dim, target_anchor_text_len, image_rotation=0):
+    # Render image in background thread
+    image_base64 = asyncio.to_thread(
+        render_pdf_to_base64png,
+        local_pdf_path,
+        page,
+        target_longest_image_dim=target_longest_image_dim
+    )
+
+    # Extract anchor text in process pool (CPU-bound, not thread-safe)
+    loop = asyncio.get_running_loop()
+    anchor_text = loop.run_in_executor(
+        process_pool,
+        partial(get_anchor_text, pdf_engine="pdfreport", target_length=target_anchor_text_len),
+        local_pdf_path,
+        page
+    )
+
+    # Wait for both operations
+    image_base64, anchor_text = await asyncio.gather(image_base64, anchor_text)
+
+    # Build prompt with anchor text
+    return {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": build_finetuning_prompt(anchor_text)},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
+                ]
+            }
+        ],
+        "max_tokens": 3000,
+        "temperature": 0.8
+    }
+```
+
+### Process Pool Requirement
+
+<Warning>
+`get_anchor_text()` **must** run in a process pool, not a thread pool:
+
+- The underlying PDF libraries are **not thread-safe**
+- Multiple concurrent calls in threads can cause crashes
+- Process pools provide isolated memory space
+</Warning>
+
+From `pipeline.py:112-116`:
+
+```python
+# GET ANCHOR TEXT IS NOT THREAD SAFE!! Ahhhh..... don't try to do it
+# and it's also CPU bound, so it needs to run in a process pool
+loop = asyncio.get_running_loop()
+anchor_text = loop.run_in_executor(
+    process_pool,
+    partial(get_anchor_text, pdf_engine="pdfreport", target_length=target_anchor_text_len),
+    local_pdf_path,
+    page
+)
+```
+
+## Dynamic Length Adjustment
+
+If the vision model input exceeds the context window, anchor text length is automatically reduced:
+
+```python
+if base_response_data["usage"]["total_tokens"] > args.model_max_context:
+    local_anchor_text_len = max(1, local_anchor_text_len // 2)
+    logger.info(f"Reducing anchor text len to {local_anchor_text_len} for {pdf_orig_path}-{page_num}")
+    raise ValueError("Response exceeded model_max_context, cannot use this response")
+```
+
+The pipeline retries with half the anchor text length, ensuring the request fits within the model's context limit.
+
+## Fallback Behavior
+
+If all vision model retries fail, the pipeline falls back to pure anchor text:
+
+```python
+return PageResult(
+    pdf_orig_path,
+    page_num,
+    PageResponse(
+        natural_text=get_anchor_text(pdf_local_path, page_num, pdf_engine="pdftotext"),
+        primary_language=None,
+        is_rotation_valid=True,
+        rotation_correction=0,
+        is_table=False,
+        is_diagram=False
+    ),
+    input_tokens=0,
+    output_tokens=0,
+    is_fallback=True
+)
+```
+
+Note: Uses `pdftotext` for fallback (fastest and most reliable).
+
+## Example Output Comparison
+
+<Tabs>
+  <Tab title="pdftotext Output">
+    ```
+    Introduction
+
+    This document describes the architecture of our system. The system
+    consists of three main components:
+
+    1. Data processing pipeline
+    2. Model training infrastructure
+    3. Deployment system
+
+    Each component is described in detail below.
+    ```
+  </Tab>
+
+  <Tab title="pdfreport Output">
+    ```
+    Page dimensions: 612.0x792.0
+    [72x720]Introduction
+    [72x680]This document describes the architecture of our system. The system
+    [72x666]consists of three main components:
+    [90x640]1. Data processing pipeline
+    [90x620]2. Model training infrastructure
+    [90x600]3. Deployment system
+    [Image 400x500 to 550x650]
+    [72x450]Each component is described in detail below.
+    ```
+  </Tab>
+</Tabs>
+
+The pdfreport format provides:
+- **Spatial context**: x/y coordinates show text positioning
+- **Image awareness**: Bounding boxes indicate where images appear
+- **Page structure**: Dimensions help understand document layout
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Choosing the Right Engine">
+    - **Production**: Use `pdfreport` for best quality
+    - **Simple docs**: Use `pdftotext` for speed
+    - **Fallback**: Use `pdftotext` when vision model fails
+    - **Experimentation**: Use `topcoherency` to compare engines
+  </Accordion>
+
+  <Accordion title="Setting Target Length">
+    - **Default**: 6000 characters works well for most documents
+    - **Dense pages**: Increase to 8000-10000 for pages with lots of text
+    - **Simple pages**: Reduce to 4000 for faster processing
+    - **Context limits**: Will auto-reduce if exceeding model context
+  </Accordion>
+
+  <Accordion title="Performance Optimization">
+    - **Process pools**: Always use process pools, never thread pools
+    - **Async operations**: Pair with async image rendering for parallelism
+    - **Caching**: Consider caching anchor text for repeated processing
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Pipeline Architecture" icon="diagram-project" href="/concepts/pipeline">
+    See how anchor text fits into the full pipeline
+  </Card>
+  <Card title="Prompting Strategy" icon="message" href="/api/prompts">
+    Learn how anchor text is used in prompts
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/prompts">
+    Full API documentation for anchor text functions
+  </Card>
+  <Card title="Training" icon="graduation-cap" href="/training/overview">
+    Train models to use anchor text effectively
+  </Card>
+</CardGroup>

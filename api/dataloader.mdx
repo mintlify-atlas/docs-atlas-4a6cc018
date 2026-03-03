@@ -1,0 +1,595 @@
+---
+title: Data Loading API
+description: Dataset preparation and loading utilities for OCR model training
+---
+
+## Overview
+
+The Data Loading API provides tools for building fine-tuning datasets from OpenAI-style batch responses, managing PDF caching, and preparing data for vision-language model training. It handles S3 and local file systems, parallel processing, and automatic data validation.
+
+## Main Functions
+
+### build_finetuning_dataset
+
+Build a complete fine-tuning dataset from OpenAI batch response JSONL files.
+
+<ParamField path="response_glob_path" type="str" required>
+  Glob pattern for response JSONL files (supports S3 paths like `s3://bucket/path/*.jsonl`)
+</ParamField>
+
+<ParamField path="pdf_cache_location" type="str | None">
+  Local directory for caching PDFs (defaults to `~/.cache/olmocr_pdfs`)
+</ParamField>
+
+<ParamField path="num_proc" type="int" default="32">
+  Number of parallel processes for dataset operations
+</ParamField>
+
+<ResponseField name="dataset" type="Dataset">
+  HuggingFace Dataset with columns:
+  - `s3_path`: S3 path to PDF
+  - `page_num`: Page number (1-indexed)
+  - `response`: OCR response text
+  - `finish_reason`: Completion status
+  - `local_pdf_path`: Local cached PDF path
+</ResponseField>
+
+**Source:** `olmocr/train/dataloader.py:136`
+
+<CodeGroup>
+```python Basic Usage
+from olmocr.train.dataloader import build_finetuning_dataset
+
+# Load from S3
+dataset = build_finetuning_dataset(
+    response_glob_path="s3://my-bucket/responses/*.jsonl",
+    pdf_cache_location="/mnt/cache/pdfs",
+    num_proc=64
+)
+
+print(f"Loaded {len(dataset)} training examples")
+print(dataset[0])
+```
+
+```python Local Files
+dataset = build_finetuning_dataset(
+    response_glob_path="./data/responses/*.jsonl",
+    num_proc=16
+)
+
+# Iterate through dataset
+for example in dataset:
+    print(f"PDF: {example['s3_path']}, Page: {example['page_num']}")
+    print(f"Response: {example['response'][:100]}...")
+```
+</CodeGroup>
+
+<Info>
+The function automatically:
+- Filters entries with `finish_reason != "stop"` (errors and overruns)
+- Downloads and caches PDFs locally
+- Validates that anchor text can be generated
+- Removes pages with missing PDF data
+</Info>
+
+### list_dataset_files
+
+List files matching a glob pattern from S3 or local filesystem.
+
+<ParamField path="s3_glob_path" type="str" required>
+  Glob pattern (e.g., `s3://bucket/path/*.jsonl` or `./data/*.json`)
+</ParamField>
+
+<ResponseField name="files" type="list[str]">
+  List of matching file paths
+</ResponseField>
+
+**Source:** `olmocr/train/dataloader.py:24`
+
+<CodeGroup>
+```python S3 Listing
+from olmocr.train.dataloader import list_dataset_files
+
+# List S3 files with wildcard
+files = list_dataset_files("s3://bucket/data/batch_*.jsonl")
+print(f"Found {len(files)} files")
+```
+
+```python Local Listing
+files = list_dataset_files("./responses/*.jsonl")
+for file in files:
+    print(file)
+```
+</CodeGroup>
+
+### load_jsonl_into_ds
+
+Load JSONL files into a HuggingFace Dataset.
+
+<ParamField path="s3_glob_path" type="str" required>
+  Glob pattern for JSONL files
+</ParamField>
+
+<ParamField path="first_n_files" type="int | None">
+  Limit to first N files (useful for testing)
+</ParamField>
+
+<ResponseField name="dataset" type="Dataset">
+  HuggingFace Dataset with train split
+</ResponseField>
+
+**Source:** `olmocr/train/dataloader.py:52`
+
+```python
+from olmocr.train.dataloader import load_jsonl_into_ds
+
+# Load all files
+dataset = load_jsonl_into_ds("s3://bucket/responses/*.jsonl")
+
+# Load first 10 files for testing
+test_dataset = load_jsonl_into_ds(
+    "s3://bucket/responses/*.jsonl",
+    first_n_files=10
+)
+```
+
+### extract_openai_batch_response
+
+Parse OpenAI batch API response format into structured fields.
+
+<ParamField path="example" type="dict" required>
+  Raw JSONL entry from OpenAI batch response
+</ParamField>
+
+<ResponseField name="parsed" type="dict">
+  Dictionary with keys:
+  - `s3_path`: Extracted S3 path
+  - `page_num`: Extracted page number
+  - `response`: Response content
+  - `finish_reason`: Completion status
+</ResponseField>
+
+**Source:** `olmocr/train/dataloader.py:70`
+
+```python
+from olmocr.train.dataloader import extract_openai_batch_response
+
+raw_entry = {
+    "custom_id": "s3://bucket/doc.pdf-5",
+    "response": {
+        "body": {
+            "choices": [{
+                "message": {"content": "Extracted text..."},
+                "finish_reason": "stop"
+            }]
+        }
+    }
+}
+
+parsed = extract_openai_batch_response(raw_entry)
+print(parsed)
+# {'s3_path': 's3://bucket/doc.pdf', 'page_num': 5, 
+#  'response': 'Extracted text...', 'finish_reason': 'stop'}
+```
+
+### cache_s3_files
+
+Download and cache S3 PDFs to local storage with file locking.
+
+<ParamField path="dataset" type="Dataset" required>
+  Dataset with `s3_path` column
+</ParamField>
+
+<ParamField path="pdf_cache_location" type="str" required>
+  Local directory for cached files
+</ParamField>
+
+<ParamField path="num_proc" type="int" default="32">
+  Number of parallel download processes
+</ParamField>
+
+<ResponseField name="dataset" type="Dataset">
+  Dataset with added `local_pdf_path` column
+</ResponseField>
+
+**Source:** `olmocr/train/dataloader.py:116`
+
+```python
+from olmocr.train.dataloader import cache_s3_files
+from datasets import Dataset
+
+dataset = Dataset.from_dict({
+    "s3_path": [
+        "s3://bucket/doc1.pdf",
+        "s3://bucket/doc2.pdf"
+    ]
+})
+
+# Cache PDFs locally
+cached_dataset = cache_s3_files(
+    dataset,
+    pdf_cache_location="/mnt/cache/pdfs",
+    num_proc=16
+)
+
+print(cached_dataset[0]["local_pdf_path"])
+# /mnt/cache/pdfs/bucket__doc1.pdf
+```
+
+<Warning>
+Uses file locking to prevent corruption during parallel downloads. Multiple processes can safely cache the same file.
+</Warning>
+
+## Helper Functions
+
+### _cache_s3_file
+
+Internal function to download a single S3 file with locking.
+
+<ParamField path="s3_path" type="str" required>
+  S3 path to download
+</ParamField>
+
+<ParamField path="local_cache_dir" type="str" required>
+  Local cache directory
+</ParamField>
+
+<ResponseField name="local_file_path" type="str">
+  Path to cached file
+</ResponseField>
+
+**Source:** `olmocr/train/dataloader.py:92`
+
+```python
+from olmocr.train.dataloader import _cache_s3_file
+
+local_path = _cache_s3_file(
+    "s3://bucket/document.pdf",
+    "/mnt/cache/pdfs"
+)
+
+print(local_path)
+# /mnt/cache/pdfs/bucket__document.pdf
+```
+
+<Info>
+File names are generated as `{bucket}__{key_with_underscores}` to avoid path conflicts.
+</Info>
+
+## Data Processing Pipeline
+
+<Steps>
+  <Step title="List Files">
+    Find all JSONL files matching the glob pattern from S3 or local filesystem
+  </Step>
+  
+  <Step title="Load JSONL">
+    Parse JSONL files into HuggingFace Dataset format
+  </Step>
+  
+  <Step title="Extract Fields">
+    Parse OpenAI batch response format and extract s3_path, page_num, response, finish_reason
+  </Step>
+  
+  <Step title="Filter Valid Entries">
+    Keep only entries with `finish_reason == "stop"` (successful completions)
+  </Step>
+  
+  <Step title="Cache PDFs">
+    Download referenced PDFs to local cache with parallel processing
+  </Step>
+  
+  <Step title="Validate Pages">
+    Filter out pages where anchor text generation fails
+  </Step>
+  
+  <Step title="Return Dataset">
+    Provide ready-to-use dataset with local PDF paths
+  </Step>
+</Steps>
+
+## Dataset Schema
+
+The final dataset contains the following columns:
+
+<ResponseField name="s3_path" type="str">
+  S3 path to source PDF document
+</ResponseField>
+
+<ResponseField name="page_num" type="int">
+  Page number within PDF (1-indexed)
+</ResponseField>
+
+<ResponseField name="response" type="str">
+  OCR response text from the model
+</ResponseField>
+
+<ResponseField name="finish_reason" type="str">
+  Completion status ("stop" for successful, "length" for truncated)
+</ResponseField>
+
+<ResponseField name="local_pdf_path" type="str">
+  Path to locally cached PDF file
+</ResponseField>
+
+## Integration with Training
+
+The dataloader integrates with the training pipeline through `make_dataset` in `train/utils.py`:
+
+```python
+from olmocr.train.utils import make_dataset
+from olmocr.train.core.config import TrainConfig
+from transformers import AutoProcessor
+
+# Load processor
+processor = AutoProcessor.from_pretrained(
+    "Qwen/Qwen2-VL-7B-Instruct",
+    trust_remote_code=True
+)
+
+# Build datasets with transforms
+train_dataset, valid_dataset = make_dataset(config, processor)
+
+# Datasets are ready for training
+print(f"Training samples: {len(train_dataset)}")
+print(f"Validation samples: {len(valid_dataset)}")
+```
+
+**Source:** `olmocr/train/utils.py:50`
+
+## Custom ID Format
+
+OpenAI batch responses use `custom_id` to identify pages:
+
+**Format:** `s3://bucket/path/file.pdf-{page_number}`
+
+**Example:** `s3://ai2-pdfs/39ce/3db4.pdf-4` refers to page 4
+
+```python
+from olmocr.s3_utils import parse_custom_id
+
+s3_path, page_num = parse_custom_id("s3://bucket/doc.pdf-7")
+print(s3_path)   # "s3://bucket/doc.pdf"
+print(page_num)  # 7
+```
+
+## File Caching Strategy
+
+### Cache Directory Structure
+
+```
+~/.cache/olmocr_pdfs/
+├── bucket1__path_to_file1.pdf
+├── bucket1__path_to_file1.pdf.lock
+├── bucket2__another_file.pdf
+└── bucket2__another_file.pdf.lock
+```
+
+### Locking Mechanism
+
+- Each file has an associated `.lock` file
+- FileLock ensures atomic downloads
+- Multiple processes can safely access the cache
+- Already cached files are reused (not re-downloaded)
+
+```python
+from filelock import FileLock
+import os
+
+lock_file = "/cache/file.pdf.lock"
+
+with FileLock(lock_file):
+    if not os.path.exists("/cache/file.pdf"):
+        # Download file
+        download_from_s3(...)
+    else:
+        # File already exists, skip download
+        pass
+```
+
+## AWS Configuration
+
+For S3 access, configure AWS credentials:
+
+<CodeGroup>
+```bash Environment Variables
+export DS_AWS_ACCESS_KEY_ID="your-access-key"
+export DS_AWS_SECRET_ACCESS_KEY="your-secret-key"
+```
+
+```python Python Configuration
+import os
+
+os.environ["DS_AWS_ACCESS_KEY_ID"] = "your-access-key"
+os.environ["DS_AWS_SECRET_ACCESS_KEY"] = "your-secret-key"
+```
+
+```yaml Training Config
+aws:
+  access_key_id: your-access-key
+  secret_access_key: your-secret-key
+```
+</CodeGroup>
+
+## Data Validation
+
+The dataloader validates each page can generate anchor text:
+
+```python
+from olmocr.prompts.anchor import get_anchor_text
+from olmocr.data.renderpdf import get_pdf_media_box_width_height
+
+def _can_create_anchor_text(example):
+    try:
+        anchor_text = get_anchor_text(
+            example["local_pdf_path"],
+            example["page_num"],
+            pdf_engine="pdfreport",
+            target_length=4000
+        )
+        _ = get_pdf_media_box_width_height(
+            example["local_pdf_path"],
+            example["page_num"]
+        )
+        return anchor_text is not None
+    except:
+        return False
+
+# Applied during build_finetuning_dataset
+dataset = dataset.filter(_can_create_anchor_text, num_proc=32)
+```
+
+**Source:** `olmocr/train/dataloader.py:154`
+
+## Performance Optimization
+
+<AccordionGroup>
+  <Accordion title="Parallel Processing">
+    - Increase `num_proc` for faster dataset operations
+    - Default of 32 works well for most systems
+    - Balance against available CPU cores and I/O bandwidth
+    - S3 downloads benefit from higher parallelism
+  </Accordion>
+  
+  <Accordion title="Caching Strategy">
+    - Use fast local storage (SSD) for cache directory
+    - Shared cache across multiple training runs saves bandwidth
+    - Monitor cache size and clean old files periodically
+    - Consider mounting S3 with s3fs for large datasets
+  </Accordion>
+  
+  <Accordion title="Data Filtering">
+    - Filter early to reduce processing time
+    - `finish_reason == "stop"` removes ~5-10% of data
+    - Anchor text validation catches corrupted PDFs
+    - Apply additional filters before caching PDFs
+  </Accordion>
+</AccordionGroup>
+
+## Error Handling
+
+The dataloader handles common errors gracefully:
+
+### Invalid S3 Paths
+
+```python
+try:
+    dataset = build_finetuning_dataset(
+        response_glob_path="s3://invalid-bucket/path/*.jsonl"
+    )
+except ValueError as e:
+    print(f"Invalid S3 path: {e}")
+```
+
+### Missing PDFs
+
+```python
+# Pages with missing PDFs are filtered out
+# Check logs for:
+# "Could not generate anchor text for file"
+```
+
+### Corrupted Files
+
+```python
+# Silently skipped during validation
+# Monitor dataset size before/after filtering
+initial_size = len(raw_dataset)
+final_size = len(filtered_dataset)
+print(f"Filtered {initial_size - final_size} invalid pages")
+```
+
+## Advanced Usage
+
+### Custom Data Sources
+
+```python
+from olmocr.train.dataloader import (
+    load_jsonl_into_ds,
+    extract_openai_batch_response,
+    cache_s3_files
+)
+
+# Load from custom location
+raw_data = load_jsonl_into_ds("s3://custom-bucket/data/*.jsonl")
+
+# Apply custom transformations
+processed = raw_data.map(
+    extract_openai_batch_response,
+    remove_columns=raw_data.column_names,
+    num_proc=64
+)
+
+# Custom filtering
+filtered = processed.filter(
+    lambda x: len(x["response"]) > 100,  # Min length
+    num_proc=32
+)
+
+# Cache PDFs
+final_dataset = cache_s3_files(
+    filtered,
+    pdf_cache_location="/fast/ssd/cache",
+    num_proc=64
+)
+```
+
+### Combining Multiple Sources
+
+```python
+from datasets import concatenate_datasets
+from olmocr.train.dataloader import build_finetuning_dataset
+
+# Load multiple sources
+source1 = build_finetuning_dataset("s3://bucket1/data/*.jsonl")
+source2 = build_finetuning_dataset("s3://bucket2/data/*.jsonl")
+
+# Combine
+combined = concatenate_datasets([source1, source2])
+
+# Shuffle
+combined = combined.shuffle(seed=42)
+
+print(f"Combined dataset: {len(combined)} examples")
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Glob Patterns" icon="filter">
+    Use specific patterns to avoid loading unwanted files:
+    - `batch_*.jsonl` instead of `*.jsonl`
+    - `responses/2024-*/*.jsonl` for date-based organization
+    - Test with `first_n_files` before full load
+  </Card>
+  
+  <Card title="Cache Management" icon="database">
+    Maintain a healthy cache:
+    - Monitor disk usage regularly
+    - Clean old files after training completes
+    - Use dedicated cache directory per project
+    - Consider cache size in disk space planning
+  </Card>
+  
+  <Card title="Validation" icon="check">
+    Always validate data quality:
+    - Check `finish_reason == "stop"` ratio
+    - Verify anchor text generation succeeds
+    - Inspect random samples before training
+    - Track filtered page counts
+  </Card>
+  
+  <Card title="Performance" icon="gauge">
+    Optimize for your infrastructure:
+    - Adjust `num_proc` based on CPU count
+    - Use local SSD for cache when possible
+    - Monitor network bandwidth for S3 downloads
+    - Profile dataset loading times
+  </Card>
+</CardGroup>
+
+## See Also
+
+- [Training API](/api/train) - Model training with loaded datasets
+- [Evaluation API](/api/eval) - Evaluating model outputs
+- [Data Preparation Guide](/guides/data-preparation) - Preparing training data

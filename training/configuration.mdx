@@ -1,0 +1,669 @@
+---
+title: Training Configuration
+description: Complete reference for olmOCR training configuration options
+---
+
+## Overview
+
+olmOCR training is configured using YAML files and the `TrainConfig` dataclass. This page documents all available configuration options.
+
+## Configuration Structure
+
+The configuration is organized into nested sections:
+
+```yaml
+model:        # Model loading configuration
+lora:         # LoRA adapter configuration
+aws:          # AWS S3 credentials
+wandb:        # Weights & Biases logging
+train_data:   # Training dataset configuration
+valid_data:   # Validation dataset configuration
+generate:     # Generation parameters
+hparams:      # Training hyperparameters
+save:         # Checkpoint saving
+max_workers:  # Data loading workers
+```
+
+## Model Configuration
+
+### ModelConfig
+
+Controls how the model is loaded and initialized.
+
+```python train/core/config.py
+@dataclass
+class ModelConfig:
+    name_or_path: str
+    arch: str
+    dtype: str = "bfloat16"
+    use_flash_attn: bool = False
+    trust_remote_code: bool = False
+    low_cpu_mem_usage: bool = False
+    fast_tokenizer: bool = True
+    model_revision: Optional[str] = None
+```
+
+<ParamField path="name_or_path" type="string" required>
+  The model name or path to load. Must be compatible with HuggingFace transformers.
+  
+  **Examples:**
+  - `Qwen/Qwen2-VL-7B-Instruct`
+  - `allenai/Molmo-7B-O-0924`
+  - `/path/to/local/model`
+</ParamField>
+
+<ParamField path="arch" type="string" default="causal">
+  The model architecture type. Options: `causal`, `vllm`
+</ParamField>
+
+<ParamField path="dtype" type="string" default="bfloat16">
+  Precision for model weights. Options: `bfloat16`, `float16`, `float32`
+</ParamField>
+
+<ParamField path="use_flash_attn" type="boolean" default="false">
+  Whether to use flash attention for faster training. Requires compatible GPU (Ampere or newer).
+</ParamField>
+
+<ParamField path="trust_remote_code" type="boolean" default="false">
+  Whether to trust remote code when loading models. Set to `true` for models requiring custom code.
+</ParamField>
+
+<ParamField path="model_revision" type="string" optional>
+  Specific model revision/commit to use from HuggingFace Hub.
+</ParamField>
+
+### Example
+
+```yaml
+model:
+  name_or_path: Qwen/Qwen2-VL-7B-Instruct
+  arch: causal
+  dtype: bfloat16
+  use_flash_attn: true
+  trust_remote_code: false
+```
+
+## LoRA Configuration
+
+### LoraConfig
+
+Configures Low-Rank Adaptation for parameter-efficient fine-tuning.
+
+```python train/core/config.py
+@dataclass
+class LoraConfig:
+    rank: int = 16
+    alpha: int = 16
+    dropout: float = 0.05
+    bias: str = "none"
+    task_type: str = TaskType.CAUSAL_LM
+    target_modules: List[str] = [...]
+```
+
+<ParamField path="rank" type="integer" default="16">
+  The rank of the LoRA decomposition. Higher values = more parameters and capacity.
+  
+  **Recommended values:**
+  - `16`: Lightweight, good for simple tasks
+  - `32`: Balanced (recommended for most use cases)
+  - `64`: Maximum capacity for complex tasks
+</ParamField>
+
+<ParamField path="alpha" type="integer" default="16">
+  LoRA scaling parameter. Typically set equal to `rank`.
+  
+  Formula: `scaling = alpha / rank`
+</ParamField>
+
+<ParamField path="dropout" type="float" default="0.05">
+  Dropout probability for LoRA layers. Helps prevent overfitting.
+</ParamField>
+
+<ParamField path="bias" type="string" default="none">
+  Bias configuration. Options: `none`, `all`, `lora_only`
+</ParamField>
+
+<ParamField path="task_type" type="string" default="CAUSAL_LM">
+  The task type for PEFT. Use `CAUSAL_LM` for language modeling.
+</ParamField>
+
+<ParamField path="target_modules" type="list[string]" required>
+  List of module names to apply LoRA adapters to. Supports regex patterns.
+</ParamField>
+
+### Target Modules Examples
+
+<Tabs>
+  <Tab title="Qwen2-VL">
+    ```yaml
+    lora:
+      rank: 32
+      alpha: 32
+      dropout: 0.05
+      task_type: CAUSAL_LM
+      target_modules:
+        # Language model
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+        - gate_proj
+        - up_proj
+        - down_proj
+        # Vision encoder
+        - visual.blocks.[0-9]+.attn.qkv
+        - visual.blocks.[0-9]+.attn.proj
+        - visual.blocks.[0-9]+.mlp.fc1
+        - visual.blocks.[0-9]+.mlp.fc2
+        # Vision merger
+        - visual.merger.mlp.0
+        - visual.merger.mlp.2
+    ```
+  </Tab>
+  
+  <Tab title="Molmo">
+    ```yaml
+    lora:
+      rank: 32
+      alpha: 32
+      dropout: 0.05
+      task_type: CAUSAL_LM
+      target_modules:
+        # Language model
+        - att_proj
+        - ff_proj
+        - attn_out
+        - ff_out
+        # Vision transformer
+        - attention.wq
+        - attention.wk
+        - attention.wv
+        - attention.wo
+        - feed_forward.w1
+        - feed_forward.w2
+        # Image projector
+        - vision_backbone.image_projector.w1
+        - vision_backbone.image_projector.w2
+        - vision_backbone.image_projector.w3
+    ```
+  </Tab>
+</Tabs>
+
+<Info>
+Set `lora: null` or omit the section entirely to perform full fine-tuning (not recommended due to memory requirements).
+</Info>
+
+## Data Configuration
+
+### DataConfig
+
+Configures training and validation datasets.
+
+```python train/core/config.py
+@dataclass
+class DataConfig:
+    seed: int = 42
+    cache_location: Optional[str] = None
+    metric_for_best_model: Optional[str] = None
+    sources: List[SourceConfig]
+```
+
+<ParamField path="seed" type="integer" default="42">
+  Random seed for data shuffling and augmentation.
+</ParamField>
+
+<ParamField path="cache_location" type="string" optional>
+  Local directory to cache downloaded PDFs. Improves data loading speed.
+  
+  **Example:** `/data/pdf_cache`
+</ParamField>
+
+<ParamField path="metric_for_best_model" type="string" optional>
+  Metric name for selecting the best checkpoint. Format: `{source_name}_loss`
+  
+  **Example:** `validation_data_loss`
+</ParamField>
+
+<ParamField path="sources" type="list[SourceConfig]" required>
+  List of data sources to load.
+</ParamField>
+
+### SourceConfig
+
+Configures individual data sources.
+
+```python train/core/config.py
+@dataclass
+class SourceConfig:
+    name: str
+    response_glob_path: str
+    target_longest_image_dim: list[int]
+    target_anchor_text_len: list[int]
+```
+
+<ParamField path="name" type="string" required>
+  Name identifier for this data source.
+</ParamField>
+
+<ParamField path="response_glob_path" type="string" required>
+  Glob pattern for OpenAI batch response JSON files. Supports S3 and local paths.
+  
+  **Examples:**
+  - `s3://bucket/train/*.json`
+  - `/data/responses/*.json`
+</ParamField>
+
+<ParamField path="target_longest_image_dim" type="list[int]" required>
+  Image resolution(s) to render PDF pages to. Randomly selects from list during training.
+  
+  **Examples:**
+  - `[1024]` - Fixed 1024px
+  - `[768, 1024, 1280]` - Random augmentation
+</ParamField>
+
+<ParamField path="target_anchor_text_len" type="list[int]" required>
+  Target length(s) for anchor text extraction. Randomly selects from list.
+  
+  **Examples:**
+  - `[6000]` - Fixed 6000 characters
+  - `[4000, 6000, 8000]` - Variable length
+</ParamField>
+
+### Example
+
+```yaml
+train_data:
+  seed: 1337
+  cache_location: /data/pdfs
+  sources:
+    - name: arxiv_papers
+      response_glob_path: s3://bucket/arxiv_train/*.json
+      target_longest_image_dim: [1024]
+      target_anchor_text_len: [6000]
+    - name: books
+      response_glob_path: s3://bucket/books_train/*.json
+      target_longest_image_dim: [768, 1024]
+      target_anchor_text_len: [4000, 6000]
+
+valid_data:
+  cache_location: /data/pdfs
+  metric_for_best_model: arxiv_papers_loss
+  sources:
+    - name: arxiv_papers
+      response_glob_path: s3://bucket/arxiv_eval/*.json
+      target_longest_image_dim: [1024]
+      target_anchor_text_len: [6000]
+```
+
+## Hyperparameters
+
+### HyperparamConfig
+
+Controls training dynamics.
+
+```python train/core/config.py
+@dataclass
+class HyperparamConfig:
+    batch_size: int = 8
+    eval_batch_size: Optional[int] = None
+    learning_rate: float = 2e-5
+    max_steps: int = -1
+    gradient_accumulation_steps: int = 1
+    gradient_checkpointing: bool = False
+    warmup_steps: int = 0
+    warmup_ratio: float = 0.0
+    weight_decay: float = 0.0
+    clip_grad_norm: float = 0.0
+    optim: str = "adamw_torch"
+    lr_scheduler: str = "linear"
+    log_every_steps: int = 5
+    eval_every_steps: int = 100
+    find_unused_parameters: bool = False
+```
+
+<ParamField path="batch_size" type="integer" default="8">
+  Batch size per GPU. For vision models, typically set to `1`.
+</ParamField>
+
+<ParamField path="eval_batch_size" type="integer" optional>
+  Evaluation batch size. Defaults to same as `batch_size`.
+</ParamField>
+
+<ParamField path="learning_rate" type="float" default="2e-5">
+  Initial learning rate for the optimizer.
+  
+  **Recommended values:**
+  - `1e-4`: Conservative, stable
+  - `3e-4`: More aggressive
+  - `5e-5`: Very conservative
+</ParamField>
+
+<ParamField path="max_steps" type="integer" default="-1">
+  Maximum number of training steps. `-1` trains for full epochs.
+</ParamField>
+
+<ParamField path="gradient_accumulation_steps" type="integer" default="1">
+  Number of steps to accumulate gradients. Effective batch size = `batch_size * gradient_accumulation_steps * num_gpus`
+</ParamField>
+
+<ParamField path="gradient_checkpointing" type="boolean" default="false">
+  Enable gradient checkpointing to reduce memory at the cost of ~20% slower training.
+</ParamField>
+
+<ParamField path="warmup_steps" type="integer" default="0">
+  Number of warmup steps. Mutually exclusive with `warmup_ratio`.
+</ParamField>
+
+<ParamField path="warmup_ratio" type="float" default="0.0">
+  Fraction of training for warmup. E.g., `0.03` = 3% warmup.
+</ParamField>
+
+<ParamField path="weight_decay" type="float" default="0.0">
+  Weight decay coefficient for regularization. Typical: `0.01`
+</ParamField>
+
+<ParamField path="clip_grad_norm" type="float" default="0.0">
+  Maximum gradient norm. `0.0` disables clipping. Typical: `1.0`
+</ParamField>
+
+<ParamField path="optim" type="string" default="adamw_torch">
+  Optimizer to use. Options: `adamw_torch`, `adamw_hf`, `sgd`, `adafactor`
+</ParamField>
+
+<ParamField path="lr_scheduler" type="string" default="linear">
+  Learning rate scheduler. Options: `linear`, `cosine`, `constant`, `polynomial`
+</ParamField>
+
+<ParamField path="log_every_steps" type="integer" default="5">
+  Log training metrics every N steps.
+</ParamField>
+
+<ParamField path="eval_every_steps" type="integer" default="100">
+  Run evaluation every N steps.
+</ParamField>
+
+<ParamField path="find_unused_parameters" type="boolean" default="false">
+  For DDP, find unused parameters. Required for Molmo, should be `false` for Qwen2-VL.
+</ParamField>
+
+### Example
+
+```yaml
+hparams:
+  batch_size: 1
+  eval_batch_size: 1
+  gradient_accumulation_steps: 4
+  gradient_checkpointing: true
+  clip_grad_norm: 1.0
+  learning_rate: 1e-4
+  max_steps: 10000
+  log_every_steps: 10
+  eval_every_steps: 100
+  optim: adamw_torch
+  lr_scheduler: cosine
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+```
+
+## Generation Configuration
+
+### GenerateConfig
+
+Controls sequence length and generation parameters.
+
+```python train/core/config.py
+@dataclass
+class GenerateConfig:
+    max_length: int = 4096
+    temperature: float = 0.2
+    top_k: int = 50
+    top_p: float = 1.0
+    num_beams: int = 1
+```
+
+<ParamField path="max_length" type="integer" default="4096">
+  Maximum sequence length for training. Affects memory usage significantly.
+  
+  **Common values:**
+  - `4096`: Standard for most documents
+  - `8192`: Long documents
+  - `2048`: Memory-constrained settings
+</ParamField>
+
+<ParamField path="temperature" type="float" default="0.2">
+  Sampling temperature (used during inference, not training).
+</ParamField>
+
+### Example
+
+```yaml
+generate:
+  max_length: 8192
+  temperature: 0.2
+```
+
+## Save Configuration
+
+### SaveConfig
+
+Controls checkpoint saving behavior.
+
+```python train/core/config.py
+@dataclass
+class SaveConfig:
+    path: str = "./results"
+    limit: Optional[int] = None
+    save_every_steps: int = "${hparams.eval_every_steps}"
+```
+
+<ParamField path="path" type="string" default="./results">
+  Output directory for checkpoints. Supports S3 paths.
+  
+  **Examples:**
+  - `s3://bucket/models/`
+  - `/data/checkpoints/`
+</ParamField>
+
+<ParamField path="limit" type="integer" optional>
+  Maximum number of checkpoints to keep. Older checkpoints are deleted.
+</ParamField>
+
+<ParamField path="save_every_steps" type="integer">
+  Save checkpoint every N steps. Supports OmegaConf interpolation.
+</ParamField>
+
+### Example
+
+```yaml
+save:
+  path: s3://my-bucket/experiments/run-001/
+  save_every_steps: 1000
+  limit: 5  # Keep only 5 most recent checkpoints
+```
+
+## AWS Configuration
+
+### AwsConfig
+
+Credentials for S3 access.
+
+```python train/core/config.py
+@dataclass
+class AwsConfig:
+    profile: Optional[str] = None
+    access_key_id: Optional[str] = None
+    secret_access_key: Optional[str] = None
+    default_region: Optional[str] = None
+```
+
+<ParamField path="profile" type="string" optional>
+  AWS profile name from `~/.aws/credentials`
+</ParamField>
+
+<ParamField path="access_key_id" type="string" optional>
+  AWS access key ID. Can also be set via `AWS_ACCESS_KEY_ID` environment variable.
+</ParamField>
+
+<ParamField path="secret_access_key" type="string" optional>
+  AWS secret access key. Can also be set via `AWS_SECRET_ACCESS_KEY` environment variable.
+</ParamField>
+
+<ParamField path="default_region" type="string" optional>
+  Default AWS region.
+</ParamField>
+
+### Example
+
+```yaml
+aws:
+  profile: my-profile
+  default_region: us-west-2
+```
+
+<Warning>
+Never commit credentials to version control! Use environment variables or AWS profiles.
+</Warning>
+
+## WandB Configuration
+
+### WandbConfig
+
+Weights & Biases experiment tracking.
+
+```python train/core/config.py
+@dataclass
+class WandbConfig:
+    entity: str = "ai2-llm"
+    project: str = "pdf-qwen2vl"
+    wandb_api_key: Optional[str] = None
+    mode: str = "online"
+    watch: str = "false"
+```
+
+<ParamField path="entity" type="string" default="ai2-llm">
+  WandB team/entity name.
+</ParamField>
+
+<ParamField path="project" type="string" default="pdf-qwen2vl">
+  WandB project name.
+</ParamField>
+
+<ParamField path="wandb_api_key" type="string" optional>
+  WandB API key. Can also be set via `WANDB_API_KEY` environment variable.
+</ParamField>
+
+<ParamField path="mode" type="string" default="online">
+  Logging mode. Options: `online`, `offline`, `disabled`
+</ParamField>
+
+### Example
+
+```yaml
+wandb:
+  entity: my-team
+  project: document-ocr
+  mode: online
+```
+
+## Complete Configuration Example
+
+```yaml
+model:
+  name_or_path: Qwen/Qwen2-VL-7B-Instruct
+  arch: causal
+  use_flash_attn: true
+
+lora:
+  rank: 32
+  alpha: 32
+  dropout: 0.05
+  task_type: CAUSAL_LM
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+wandb:
+  project: my-ocr-project
+  entity: my-team
+
+aws:
+  profile: default
+  default_region: us-west-2
+
+generate:
+  max_length: 8192
+
+train_data:
+  seed: 1337
+  cache_location: /data/pdfs
+  sources:
+    - name: training_set
+      response_glob_path: s3://bucket/train/*.json
+      target_longest_image_dim: [1024]
+      target_anchor_text_len: [6000]
+
+valid_data:
+  cache_location: /data/pdfs
+  metric_for_best_model: training_set_loss
+  sources:
+    - name: training_set
+      response_glob_path: s3://bucket/eval/*.json
+      target_longest_image_dim: [1024]
+      target_anchor_text_len: [6000]
+
+hparams:
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  gradient_checkpointing: true
+  clip_grad_norm: 1.0
+  learning_rate: 1e-4
+  max_steps: 10000
+  log_every_steps: 10
+  eval_every_steps: 100
+  optim: adamw_torch
+  lr_scheduler: cosine
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+
+save:
+  path: s3://bucket/models/
+  save_every_steps: 1000
+  limit: 5
+
+max_workers: 10
+```
+
+## Command-Line Overrides
+
+You can override any configuration value from the command line:
+
+```bash
+python -m olmocr.train.train \
+  --config config.yaml \
+  --hparams.learning_rate 3e-4 \
+  --hparams.max_steps 5000 \
+  --lora.rank 64 \
+  --save.path s3://new-bucket/models/
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Training Overview" icon="graduation-cap" href="/training/overview">
+    Learn about the training pipeline
+  </Card>
+  <Card title="Qwen2-VL Training" icon="robot" href="/training/qwen2vl">
+    Fine-tune Qwen2-VL models
+  </Card>
+  <Card title="Molmo Training" icon="brain" href="/training/molmo">
+    Fine-tune Molmo models
+  </Card>
+  <Card title="Data Preparation" icon="database" href="/data/silver-data">
+    Prepare training datasets
+  </Card>
+</CardGroup>

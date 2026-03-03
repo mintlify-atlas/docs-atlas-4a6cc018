@@ -1,0 +1,378 @@
+---
+title: Creating Silver Training Data
+description: Generate high-quality training data using ChatGPT 4o and OpenAI Batch API
+---
+
+## Overview
+
+Silver training data is synthetic training data generated using ChatGPT 4o to convert PDF pages into clean, structured text. This process uses the OpenAI Batch API for cost-effective processing at scale.
+
+<Note>
+The Batch API is 50% cheaper than the standard API with the same performance. For large-scale data generation, this can result in significant cost savings.
+</Note>
+
+## Silver Data Generation Strategy
+
+The silver data generation process combines:
+
+1. **Visual rendering** - PDFs rendered to PNG images at 2048px resolution
+2. **Anchor text** - Raw text extracted with positional information
+3. **ChatGPT 4o** - Vision model to generate clean text output
+4. **Structured outputs** - JSON schema for consistent responses
+
+### Why "Silver" Data?
+
+Silver data sits between gold (human-annotated) and bronze (raw) data:
+
+- More scalable than gold data (no manual annotation)
+- Higher quality than bronze data (AI-cleaned)
+- Cost-effective for training OCR models
+
+## Using buildsilver.py
+
+### Basic Usage
+
+```bash
+python -m olmocr.data.buildsilver \
+  --glob_path "data/*.pdf" \
+  --num_sample_docs 5000 \
+  --max_sample_pages 15 \
+  --output openai_batch_data
+```
+
+### Arguments
+
+<ParamField path="glob_path" type="string">
+  Local or S3 path glob (e.g., `*.pdf` or `s3://bucket/pdfs/*.pdf`)
+</ParamField>
+
+<ParamField path="path_list" type="string">
+  Path to a file containing PDF paths, one per line
+</ParamField>
+
+<ParamField path="num_sample_docs" type="integer" default="5000">
+  Number of PDF documents to sample
+</ParamField>
+
+<ParamField path="first_n_pages" type="integer" default="0">
+  Always sample the first N pages of each PDF
+</ParamField>
+
+<ParamField path="max_sample_pages" type="integer" default="15">
+  Max number of pages to sample per PDF
+</ParamField>
+
+<ParamField path="no_filter" type="boolean">
+  Disable basic spam/language filtering
+</ParamField>
+
+<ParamField path="output" type="string" default="openai_batch_data">
+  Output directory for JSONL batch files
+</ParamField>
+
+<ParamField path="reservoir_size" type="integer">
+  Size of the reservoir for sampling paths. Defaults to 10x num_sample_docs
+</ParamField>
+
+### S3 Integration
+
+Process PDFs directly from S3:
+
+```bash
+python -m olmocr.data.buildsilver \
+  --glob_path "s3://my-bucket/pdfs/*.pdf" \
+  --num_sample_docs 10000 \
+  --output batch_requests
+```
+
+The script automatically:
+- Downloads PDFs from S3 to `/tmp`
+- Processes them locally
+- Cleans up temporary files
+
+### Page Sampling Strategy
+
+The script uses intelligent page sampling (see `sample_pdf_pages` in buildsilver.py:87-94):
+
+```python
+def sample_pdf_pages(num_pages: int, first_n_pages: int, max_sample_pages: int) -> list:
+    if num_pages <= first_n_pages:
+        return list(range(1, num_pages + 1))
+    sample_pages = list(range(1, first_n_pages + 1))
+    remaining_pages = list(range(first_n_pages + 1, num_pages + 1))
+    if remaining_pages:
+        sample_pages += random.sample(
+            remaining_pages, 
+            min(max_sample_pages - first_n_pages, len(remaining_pages))
+        )
+    return sample_pages
+```
+
+This ensures you always get the first pages (often most important) plus random samples from the rest.
+
+## ChatGPT 4o Prompting Approach
+
+### Prompt Structure
+
+The prompt (from prompts.py:7-17) asks ChatGPT 4o to:
+
+1. Read the PDF page image naturally
+2. Convert equations to LaTeX
+3. Convert tables to markdown
+4. Remove headers/footers but keep references and footnotes
+5. Read any handwriting
+6. Preserve sentences that span pages
+7. Return null if no readable text exists
+8. Not hallucinate
+
+<CodeGroup>
+
+```python buildsilver.py:28-84
+def build_page_query(local_pdf_path: str, pretty_pdf_path: str, page: int) -> dict:
+    image_base64 = render_pdf_to_base64png(local_pdf_path, page, TARGET_IMAGE_DIM)
+    anchor_text = get_anchor_text(local_pdf_path, page, pdf_engine="pdfreport")
+    
+    return {
+        "custom_id": f"{pretty_pdf_path}-{page}",
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "body": {
+            "model": "gpt-4o-2024-08-06",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": build_openai_silver_data_prompt(anchor_text)},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}},
+                    ],
+                }
+            ],
+            "temperature": 0.1,
+            "max_tokens": 6000,
+            "logprobs": True,
+            "top_logprobs": 5,
+            "response_format": openai_response_format_schema(),
+        },
+    }
+```
+
+```python prompts.py:7-17
+def build_openai_silver_data_prompt(base_text: str) -> str:
+    return (
+        f"Below is the image of one page of a PDF document, as well as some raw textual content "
+        f"that was previously extracted for it that includes position information for each image "
+        f"and block of text (The origin [0x0] of the coordinates is in the lower left corner of the image). "
+        f"Just return the plain text representation of this document as if you were reading it naturally.\n"
+        f"Turn equations into a LaTeX representation, and tables into markdown format. "
+        f"Remove the headers and footers, but keep references and footnotes.\n"
+        f"Read any natural handwriting.\n"
+        f"This is likely one page out of several in the document, so be sure to preserve any sentences "
+        f"that come from the previous page, or continue onto the next page, exactly as they are.\n"
+        f"If there is no text at all that you think you should read, you can output null.\n"
+        f"Do not hallucinate.\n"
+        f"RAW_TEXT_START\n{base_text}\nRAW_TEXT_END"
+    )
+```
+
+</CodeGroup>
+
+### Structured Output Schema
+
+The response follows a strict JSON schema (prompts.py:49-96):
+
+```json
+{
+  "primary_language": "en",
+  "is_rotation_valid": true,
+  "rotation_correction": 0,
+  "is_table": false,
+  "is_diagram": false,
+  "natural_text": "The extracted clean text..."
+}
+```
+
+<Accordion title="Field Descriptions">
+  - **primary_language**: Two-letter language code or null if no text
+  - **is_rotation_valid**: Whether the page is oriented correctly for reading
+  - **rotation_correction**: Degrees of clockwise rotation needed (0, 90, 180, or 270)
+  - **is_table**: Whether majority of content is tabular
+  - **is_diagram**: Whether majority of content is a visual diagram
+  - **natural_text**: The cleaned, natural text content
+</Accordion>
+
+## OpenAI Batch API Usage
+
+### Output Format
+
+The script generates JSONL files in the OpenAI Batch API format (buildsilver.py:206-266):
+
+```jsonl
+{"custom_id": "document.pdf-1", "method": "POST", "url": "/v1/chat/completions", "body": {...}}
+{"custom_id": "document.pdf-2", "method": "POST", "url": "/v1/chat/completions", "body": {...}}
+```
+
+<Info>
+Files are automatically split at 99MB to stay under OpenAI's 100MB batch file limit.
+</Info>
+
+### Submitting Batches
+
+After generating batch files, submit them to OpenAI:
+
+```bash
+# Install OpenAI CLI
+pip install openai
+
+# Submit batch
+openai api batches.create \
+  --input-file batch_requests/output_0.jsonl \
+  --endpoint /v1/chat/completions
+
+# Check status
+openai api batches.retrieve <batch_id>
+
+# Download results
+openai api batches.download <batch_id> > results.jsonl
+```
+
+### Processing Results
+
+Once you have results, extract the natural text:
+
+```python
+import json
+
+with open('results.jsonl', 'r') as f:
+    for line in f:
+        result = json.loads(line)
+        response = result['response']['body']['choices'][0]['message']['content']
+        data = json.loads(response)
+        
+        custom_id = result['custom_id']
+        natural_text = data['natural_text']
+        
+        print(f"{custom_id}: {natural_text[:100]}...")
+```
+
+## Expert Tips on Structured Outputs
+
+<Warning>
+These tips come directly from the code comments in buildsilver.py:56-62 and are based on real experience processing thousands of documents.
+</Warning>
+
+### 1. Use Batch API for Cost Savings
+
+> "Use the batch query system, it's 1/2 the price and exactly the same performance"
+
+The Batch API provides 50% cost reduction with no performance penalty.
+
+### 2. Always Use Structured Outputs
+
+> "If your application is not an actual chatbot, use structured outputs!"
+
+Even if the last 10 queries returned perfect results, unstructured outputs won't scale to thousands of queries. You'll get inconsistent formatting and LLM fluff text.
+
+### 3. Field Order Matters
+
+> "The order in which fields are in your schema, is the order in which the model will answer them"
+
+Place preparatory or chain-of-thought fields first:
+
+```json
+{
+  "is_rotation_valid": bool,  // Answer first
+  "rotation_correction": int,  // Then this
+  "natural_text": str          // Finally the main content
+}
+```
+
+This gives better answers for later fields.
+
+### 4. Check for Typos
+
+> "Check your prompt for typos, it makes a performance difference!"
+
+Typos in prompts degrade model performance. Review prompts carefully.
+
+### 5. Request Logprobs
+
+> "Ask for logprobs, it's not any more expensive and you can use them later to help identify problematic responses"
+
+Set `"logprobs": True` and `"top_logprobs": 5` to get confidence scores for filtering low-quality responses later.
+
+## Output Structure
+
+The script creates:
+
+```
+openai_batch_data/
+├── output_0.jsonl  (up to 99MB)
+├── output_1.jsonl  (up to 99MB)
+└── output_2.jsonl  (up to 99MB)
+```
+
+Each file contains batch requests ready for OpenAI.
+
+## Filtering Integration
+
+By default, the script uses `PdfFilter` to exclude:
+
+- Non-English documents
+- PDF forms
+- SEO spam PDFs
+
+See the [Filtering](/data/filtering) guide for details.
+
+To disable filtering:
+
+```bash
+python -m olmocr.data.buildsilver \
+  --glob_path "data/*.pdf" \
+  --no_filter
+```
+
+## Performance Considerations
+
+### Parallel Processing
+
+The script uses `ProcessPoolExecutor` for parallel PDF processing (buildsilver.py:222-264):
+
+```python
+with ProcessPoolExecutor() as executor:
+    futures = []
+    for pdf_path in pdf_paths:
+        futures.append(executor.submit(
+            process_pdf, 
+            pdf_path, 
+            args.first_n_pages, 
+            args.max_sample_pages, 
+            args.no_filter
+        ))
+```
+
+### Reservoir Sampling
+
+For large datasets, reservoir sampling (buildsilver.py:152-201) ensures uniform random sampling without loading all paths into memory:
+
+```python
+# Only keep reservoir_size paths in memory
+if len(pdf_paths) < args.reservoir_size:
+    pdf_paths.append(path)
+else:
+    s = random.randint(1, n)
+    if s <= args.reservoir_size:
+        pdf_paths[s - 1] = path
+```
+
+Default reservoir size is 10x the target document count.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Build Test Sets" icon="vial" href="/data/test-sets">
+    Create evaluation datasets
+  </Card>
+  <Card title="Filter PDFs" icon="filter" href="/data/filtering">
+    Configure PDF filtering
+  </Card>
+</CardGroup>

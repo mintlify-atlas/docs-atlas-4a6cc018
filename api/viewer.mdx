@@ -1,0 +1,188 @@
+---
+title: "Dolma Viewer"
+description: "API reference for the Dolma viewer module that generates HTML previews from JSONL files"
+---
+
+## Overview
+
+The `dolmaviewer` module provides functionality to generate interactive HTML pages from JSONL files containing document data. It supports both local and S3 paths, renders PDF pages as images, and creates pre-signed URLs for S3 resources.
+
+## Main Function
+
+### main
+
+```python
+main(jsonl_paths, output_dir, template_path, s3_profile_name)
+```
+
+Generates HTML pages from one or more JSONL files with pre-signed S3 links.
+
+<ParamField path="jsonl_paths" type="list[str]" required>
+  List of paths to JSONL files (local or s3://). Supports glob patterns for local paths.
+</ParamField>
+
+<ParamField path="output_dir" type="str" default="dolma_previews">
+  Directory where HTML files will be saved
+</ParamField>
+
+<ParamField path="template_path" type="str" default="dolmaviewer_template.html">
+  Path to the Jinja2 template file for HTML generation
+</ParamField>
+
+<ParamField path="s3_profile_name" type="str | None" default="None">
+  AWS profile name to use for accessing S3 resources
+</ParamField>
+
+## Core Functions
+
+### read_jsonl
+
+```python
+read_jsonl(paths) -> Generator[str]
+```
+
+Generator that yields lines from multiple JSONL files. Supports both local and S3 paths.
+
+<ParamField path="paths" type="list[str]" required>
+  List of file paths to read (local or S3)
+</ParamField>
+
+**Returns:** Generator yielding stripped lines from the files
+
+**Example:**
+```python
+from olmocr.viewer.dolmaviewer import read_jsonl
+
+paths = ["data/documents.jsonl", "s3://bucket/data/more-docs.jsonl"]
+for line in read_jsonl(paths):
+    data = json.loads(line)
+    print(data["id"])
+```
+
+### generate_presigned_url
+
+```python
+generate_presigned_url(s3_client, bucket_name, key_name) -> str | None
+```
+
+Generates a pre-signed URL for an S3 object that expires in 1 week.
+
+<ParamField path="s3_client" type="boto3.client" required>
+  Boto3 S3 client instance
+</ParamField>
+
+<ParamField path="bucket_name" type="str" required>
+  Name of the S3 bucket
+</ParamField>
+
+<ParamField path="key_name" type="str" required>
+  S3 object key
+</ParamField>
+
+**Returns:** Pre-signed URL string, or None if credentials are invalid
+
+**Example:**
+```python
+import boto3
+from olmocr.viewer.dolmaviewer import generate_presigned_url
+
+s3_client = boto3.client("s3")
+url = generate_presigned_url(s3_client, "my-bucket", "documents/file.pdf")
+print(f"Download link: {url}")
+```
+
+### process_document
+
+```python
+process_document(data, s3_client, template, output_dir)
+```
+
+Processes a single document from JSONL data and generates an HTML file.
+
+<ParamField path="data" type="dict" required>
+  Dictionary containing document data with keys: `id`, `text`, `attributes`, `metadata`
+</ParamField>
+
+<ParamField path="s3_client" type="boto3.client" required>
+  Boto3 S3 client for downloading PDFs and generating URLs
+</ParamField>
+
+<ParamField path="template" type="jinja2.Template" required>
+  Jinja2 template object for rendering HTML
+</ParamField>
+
+<ParamField path="output_dir" type="str" required>
+  Directory where the HTML file will be saved
+</ParamField>
+
+This function:
+1. Extracts PDF page information from the document data
+2. Downloads the source PDF from S3
+3. Renders each PDF page as a base64-encoded WebP image
+4. Converts markdown text to HTML
+5. Generates a pre-signed S3 URL for the source PDF
+6. Renders the final HTML using the template
+
+## HTML Generation Workflow
+
+The viewer follows this workflow to generate HTML previews:
+
+1. **Read JSONL files** - Loads document data from local or S3 paths
+2. **Process each document** - Extracts text, metadata, and PDF page information
+3. **Render PDF pages** - Converts PDF pages to base64 WebP images
+4. **Convert markdown** - Transforms markdown text to HTML with table support
+5. **Generate S3 links** - Creates pre-signed URLs for source PDFs
+6. **Render HTML** - Uses Jinja2 template to create the final HTML page
+7. **Save output** - Writes HTML files to the output directory
+
+## Usage Example
+
+```python
+from olmocr.viewer.dolmaviewer import main
+
+# Generate HTML previews from JSONL files
+jsonl_files = [
+    "data/documents.jsonl",
+    "s3://my-bucket/processed/*.jsonl"
+]
+
+main(
+    jsonl_paths=jsonl_files,
+    output_dir="html_previews",
+    template_path="custom_template.html",
+    s3_profile_name="my-aws-profile"
+)
+```
+
+## Command Line Usage
+
+```bash
+python -m olmocr.viewer.dolmaviewer \
+  data/docs.jsonl \
+  s3://bucket/more-docs.jsonl \
+  --output_dir ./previews \
+  --template_path custom.html \
+  --s3_profile my-profile
+```
+
+## Document Data Format
+
+The JSONL files should contain documents in this format:
+
+```json
+{
+  "id": "doc-123",
+  "text": "Document text with markdown...",
+  "attributes": {
+    "pdf_page_numbers": [
+      [0, 500, 1],
+      [500, 1200, 2]
+    ]
+  },
+  "metadata": {
+    "Source-File": "s3://bucket/source.pdf"
+  }
+}
+```
+
+Where `pdf_page_numbers` is a list of `[start_index, end_index, page_number]` tuples mapping text ranges to PDF pages.
