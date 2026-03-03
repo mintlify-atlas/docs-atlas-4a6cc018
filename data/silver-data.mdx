@@ -217,12 +217,26 @@ Files are automatically split at 99MB to stay under OpenAI's 100MB batch file li
 
 ### Submitting Batches
 
-After generating batch files, submit them to OpenAI:
+After generating batch files, use the `runopenaibatch.py` script to automatically submit, monitor, and download results:
 
 ```bash
-# Install OpenAI CLI
-pip install openai
+# Set your OpenAI API key
+export OPENAI_API_KEY=your_api_key_here
 
+# Submit batches (automatically manages 100GB storage limit)
+python -m olmocr.data.runopenaibatch batch_requests
+
+# Process with custom storage limit (default: 25GB at a time)
+python -m olmocr.data.runopenaibatch --max_gb 50 batch_requests
+```
+
+<Tip>
+The script automatically handles OpenAI's 100GB storage limit by uploading batches incrementally, waiting for completion, and downloading results before uploading more.
+</Tip>
+
+Alternatively, use the OpenAI CLI directly:
+
+```bash
 # Submit batch
 openai api batches.create \
   --input-file batch_requests/output_0.jsonl \
