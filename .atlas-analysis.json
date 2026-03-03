@@ -1,0 +1,130 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "olmOCR",
+  "projectDescription": "A toolkit for training language models to work with PDF documents in the wild",
+  "theme": "aspen",
+  "primaryColor": "#4A90E2",
+  "lightColor": "#6BA3E8",
+  "darkColor": "#2E5A8F",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/overview",
+              "concepts/pipeline",
+              "concepts/anchor-text"
+            ]
+          },
+          {
+            "group": "Usage Guides",
+            "pages": [
+              "guides/local-usage",
+              "guides/cluster-usage",
+              "guides/viewing-results"
+            ]
+          },
+          {
+            "group": "Data Preparation",
+            "pages": [
+              "data/silver-data",
+              "data/test-sets",
+              "data/filtering"
+            ]
+          },
+          {
+            "group": "Training",
+            "pages": [
+              "training/overview",
+              "training/qwen2vl",
+              "training/molmo",
+              "training/configuration"
+            ]
+          },
+          {
+            "group": "Evaluation",
+            "pages": [
+              "evaluation/benchmark",
+              "evaluation/running-evals",
+              "evaluation/comparing-results"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Pipeline",
+            "pages": [
+              "api/pipeline",
+              "api/work-queue",
+              "api/rendering"
+            ]
+          },
+          {
+            "group": "Data Processing",
+            "pages": [
+              "api/buildsilver",
+              "api/filter",
+              "api/prompts"
+            ]
+          },
+          {
+            "group": "Training & Evaluation",
+            "pages": [
+              "api/train",
+              "api/eval",
+              "api/dataloader"
+            ]
+          },
+          {
+            "group": "Utilities",
+            "pages": [
+              "api/viewer",
+              "api/s3-utils",
+              "api/metrics"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "ChatGPT 4o-based prompting strategy for natural text parsing from PDFs",
+    "Side-by-side evaluation toolkit for comparing different pipeline versions",
+    "Language detection and SEO spam filtering",
+    "Fine-tuning support for Qwen2-VL and Molmo-O models",
+    "Distributed processing of millions of PDFs using SGlang",
+    "Dolma-compatible output format for LLM training datasets",
+    "Benchmark suite (olmOCR-Bench) for evaluating document parsing accuracy",
+    "Local and cloud-based processing with AWS S3 integration",
+    "Beaker cluster integration for large-scale processing",
+    "Visual PDF viewer for side-by-side result comparison"
+  ],
+  "publicApiSurface": [
+    "olmocr.pipeline - Main PDF processing pipeline",
+    "olmocr.data.buildsilver - Generate silver training data using ChatGPT 4o",
+    "olmocr.data.buildtestset - Create test datasets",
+    "olmocr.data.renderpdf - Render PDFs to base64 PNG images",
+    "olmocr.train.train - Fine-tune vision-language models",
+    "olmocr.eval.runeval - Run evaluation benchmarks",
+    "olmocr.filter.filter.PdfFilter - Filter PDFs by language and spam detection",
+    "olmocr.viewer.dolmaviewer - View Dolma-format results with PDFs",
+    "olmocr.work_queue - Distributed work queue management",
+    "olmocr.prompts - Prompt templates for LLM interactions",
+    "olmocr.bench - Benchmarking suite for OCR/parsing tools",
+    "olmocr.s3_utils - AWS S3 utilities for cloud storage"
+  ]
+}
